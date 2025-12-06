@@ -124,4 +124,13 @@ public class CheckingAccount implements Account {
     public void reopen() {
         setStatus(new ActiveState());
     }
+    // inside CheckingAccount class
+    public double getOverdraftLimit() {
+        return overdraftLimit;
+    }
+
+    public void setOverdraftLimit(double limit) {
+        this.overdraftLimit = limit;
+    }
+
 }
