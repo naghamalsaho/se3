@@ -1,19 +1,22 @@
 package accounts;
 
 import accounts.state.AccountStatus;
-import accounts.state.ActiveState;
 import notifications.NotificationObserver;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
+/**
+ * Composite account (family / group).
+ * Now supports deposit/withdraw by delegating to children using strategies.
+ */
 public class AccountGroup implements Account {
     private final String id;
     private final String name;
     private final List<Account> children = new ArrayList<>();
 
-    // state for the group (propagate to children on set)
-    private AccountStatus status = new ActiveState();
+    // default strategies (can be changed by caller)
+    private DepositStrategy depositStrategy = new EvenSplitDeposit();
+    private WithdrawStrategy withdrawStrategy = new SequentialWithdraw();
 
     public AccountGroup(String id, String name){
         this.id = id; this.name = name;
@@ -21,93 +24,95 @@ public class AccountGroup implements Account {
 
     public void add(Account a){ children.add(a); }
     public void remove(Account a){ children.remove(a); }
+    public List<Account> getChildren(){ return Collections.unmodifiableList(children); }
 
     @Override public String getId(){ return id; }
     @Override public String getName(){ return name; }
-
-    @Override
-    public double getBalance(){
+    @Override public double getBalance(){
         return children.stream().mapToDouble(Account::getBalance).sum();
     }
 
-    // Public operations on group are not supported (must operate on child accounts individually)
     @Override
-    public void deposit(double amount) {
-        throw new UnsupportedOperationException("Deposit to group: deposit to child accounts individually");
+    public void deposit(double amount){
+        // compute distribution then call deposit on children
+        Map<Account, Double> plan = depositStrategy.splitDeposit(children, amount);
+        for (Map.Entry<Account, Double> e : plan.entrySet()) {
+            e.getKey().deposit(e.getValue());
+        }
+        notifyObservers("deposit", String.format("Group deposit %.2f distributed to %d children", amount, plan.size()));
     }
 
     @Override
-    public void withdraw(double amount) {
-        throw new UnsupportedOperationException("Withdraw from group not supported");
+    public void withdraw(double amount){
+        Map<Account, Double> plan = withdrawStrategy.splitWithdraw(children, amount);
+        for (Map.Entry<Account, Double> e : plan.entrySet()) {
+            e.getKey().withdraw(e.getValue());
+        }
+        notifyObservers("withdraw", String.format("Group withdraw %.2f across %d children", amount, plan.size()));
     }
 
-    // Internal ops required by Account interface - not applicable for group
     @Override
     public void depositInternal(double amount) {
-        throw new UnsupportedOperationException("depositInternal not supported on AccountGroup");
+
     }
 
     @Override
     public void withdrawInternal(double amount) {
-        throw new UnsupportedOperationException("withdrawInternal not supported on AccountGroup");
+
+    }
+
+    // observer management: attach observer to all children
+    @Override
+    public void addObserver(NotificationObserver observer) {
+        for (Account a : children) a.addObserver(observer);
     }
 
     @Override
-    public void addObserver(NotificationObserver observer){
-        for(Account a : children) a.addObserver(observer);
+    public void removeObserver(NotificationObserver observer) {
+        for (Account a : children) a.removeObserver(observer);
     }
 
     @Override
-    public void removeObserver(NotificationObserver observer){
-        for(Account a : children) a.removeObserver(observer);
+    public void notifyObservers(String event, String message) {
+        for (Account a : children) a.notifyObservers(event, message);
     }
 
-    @Override
-    public void notifyObservers(String event, String message){
-        for(Account a : children) a.notifyObservers(event, message);
-    }
-
-    // -------------------- State management --------------------
     @Override
     public AccountStatus getStatus() {
-        return status;
+        return null;
     }
 
-    /**
-     * Set status for the group and propagate to children.
-     * Note: children might override status according to their own logic.
-     */
     @Override
     public void setStatus(AccountStatus status) {
-        this.status = status;
-        // propagate to children
-        for (Account a : children) {
-            a.setStatus(status);
-        }
+
     }
 
     @Override
     public String getStatusName() {
-        return status.name();
+        return "";
     }
 
     @Override
     public void freeze() {
-        setStatus(new accounts.state.FrozenState());
+
     }
 
     @Override
     public void suspend() {
-        setStatus(new accounts.state.SuspendedState());
+
     }
 
     @Override
     public void close() {
-        setStatus(new accounts.state.ClosedState());
+
     }
 
     @Override
     public void reopen() {
-        setStatus(new accounts.state.ActiveState());
+
     }
+
+    // strategy setters
+    public void setDepositStrategy(DepositStrategy s){ this.depositStrategy = s; }
+    public void setWithdrawStrategy(WithdrawStrategy s){ this.withdrawStrategy = s; }
 }

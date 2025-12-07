@@ -7,11 +7,13 @@ import accounts.decorators.OverdraftProtectionDecorator;
 import customers.TicketService;
 import notifications.EmailNotifier;
 import notifications.SMSNotifier;
-import payment.PayPalApi;
-import payment.PayPalAdapter;
-import payment.PaymentGateway;
-import payment.PaymentService;
-import recommendations.RecommendationService;
+import accounts.AccountGroup;
+import accounts.EvenSplitDeposit;
+import accounts.SingleTargetDeposit;
+import accounts.SequentialWithdraw;
+import interest.SimpleInterestStrategy;
+import accounts.SavingsAccount;
+
 import security.AuthService;
 import security.Role;
 import transactions.RecurringTransaction;
@@ -19,6 +21,8 @@ import transactions.Transaction;
 import transactions.TransactionService;
 
 import java.util.*;
+
+
 
 /**
  * Interactive CLI for the banking system.
@@ -84,6 +88,13 @@ public class InteractiveConsole {
                     case "7": cmdViewHistory(); break;
                     case "8": cmdCreateTicket(userId); break;
                     case "9": cmdDecorateAccount(); break;
+                    case "10": cmdCreateGroup(); break;
+                    case "11": cmdAddToGroup(); break;
+                    case "12": cmdRemoveFromGroup(); break;
+                    case "13": cmdDepositToGroup(); break;
+                    case "14": cmdWithdrawFromGroup(); break;
+                    case "15": cmdApplyInterestToGroup(); break;
+
                     case "0": running = false; break;
                     default: System.out.println("Invalid choice"); break;
                 }
@@ -107,6 +118,13 @@ public class InteractiveConsole {
         System.out.println("7) View transaction history");
         System.out.println("8) Create support ticket");
         System.out.println("9) Add feature to account (Decorator)");
+        System.out.println("10) Create account group");
+        System.out.println("11) Add account to group");
+        System.out.println("12) Remove account from group");
+                System.out.println("13) Deposit to group");
+                        System.out.println("14) Withdraw from group");
+                                System.out.println("15) Apply interest to group");
+
         System.out.println("0) Exit");
         System.out.print("> ");
     }
@@ -114,43 +132,91 @@ public class InteractiveConsole {
     private void cmdCreateAccount(String userId) {
         System.out.println("Choose type: 1) Savings 2) Checking 3) Loan 4) Investment");
         String t = scanner.nextLine().trim();
-        System.out.print("Enter account id (e.g. s2): ");
-        String id = scanner.nextLine().trim();
+
+        // no id asked anymore - always auto-generate
+        String id = null;
+
         System.out.print("Enter account owner/name: ");
         String name = scanner.nextLine().trim();
-        System.out.print("Initial amount (number): ");
-        double initial = Double.parseDouble(scanner.nextLine().trim());
+        if (name.isEmpty()) {
+            System.out.println("Owner name is required.");
+            return;
+        }
+        String nameKey = name.toLowerCase().trim();
 
-        Account a;
-        switch (t) {
-            case "1":
-                a = AccountFactory.createSavings(id, name, initial);
-                break;
-            case "2":
-                a = AccountFactory.createChecking(id, name, initial);
-                break;
-            case "3":
-                System.out.print("Enter loan interest rate (yearly %): ");
-                double rate = Double.parseDouble(scanner.nextLine().trim());
-                a = AccountFactory.createLoan(id, name, initial, rate);
-                break;
-            case "4":
-                System.out.print("Enter portfolio type (e.g. balanced): ");
-                String p = scanner.nextLine().trim();
-                a = AccountFactory.createInvestment(id, name, initial, p);
-                break;
-            default:
-                System.out.println("Unknown type");
-                return;
+        System.out.print("Initial amount (number): ");
+        double initial;
+        try {
+            initial = Double.parseDouble(scanner.nextLine().trim());
+        } catch (NumberFormatException ex) {
+            System.out.println("Invalid initial amount.");
+            return;
         }
 
-        // register observer default
+        // check owner name uniqueness (case-insensitive)
+        boolean nameExists = accounts.values().stream()
+                .anyMatch(a -> a.getName() != null && a.getName().trim().toLowerCase().equals(nameKey));
+        if (nameExists) {
+            System.out.println("Cannot create account: owner name already exists: " + name);
+            return;
+        }
+
+        // create via factory (pass null id to auto-generate)
+        Account a;
+        try {
+            switch (t) {
+                case "1":
+                    a = AccountFactory.createSavings(id, name, initial);
+                    break;
+                case "2":
+                    a = AccountFactory.createChecking(id, name, initial);
+                    break;
+                case "3":
+                    System.out.print("Enter loan interest rate (yearly %): ");
+                    double rate = Double.parseDouble(scanner.nextLine().trim());
+                    a = AccountFactory.createLoan(id, name, initial, rate);
+                    break;
+                case "4":
+                    System.out.print("Enter portfolio type (e.g. balanced): ");
+                    String p = scanner.nextLine().trim();
+                    if (p.isEmpty()) p = "balanced";
+                    a = AccountFactory.createInvestment(id, name, initial, p);
+                    break;
+                default:
+                    System.out.println("Unknown type");
+                    return;
+            }
+        } catch (Exception e) {
+            System.out.println("Error creating account object: " + e.getMessage());
+            return;
+        }
+
+        // try atomic insertion by id to avoid race on generated id
+        Account existing = accounts.putIfAbsent(a.getId(), a);
+        if (existing != null) {
+            System.out.println("Cannot register account: generated id conflict: " + a.getId());
+            return;
+        }
+
+        // double-check name uniqueness (race-safe): if some other thread added same name meanwhile, rollback
+        boolean nameConflictAfter = accounts.values().stream()
+                .filter(acc -> !acc.getId().equals(a.getId()))
+                .anyMatch(acc -> acc.getName() != null && acc.getName().trim().toLowerCase().equals(nameKey));
+        if (nameConflictAfter) {
+            // rollback insertion
+            accounts.remove(a.getId(), a);
+            System.out.println("Cannot create account: owner name was taken concurrently: " + name);
+            return;
+        }
+
+        // attach observers and finish
         a.addObserver(emailNotifier);
         a.addObserver(smsNotifier);
 
-        accounts.put(a.getId(), a);
         System.out.println("Created account: " + a.getId() + " (" + a.getName() + ")");
     }
+
+
 
     private void cmdListAccounts() {
         if (accounts.isEmpty()) {
@@ -263,4 +329,188 @@ public class InteractiveConsole {
                 System.out.println("Unknown decorator");
         }
     }
+    // 10) Create account group
+    private void cmdCreateGroup() {
+        System.out.print("Enter group name: ");
+        String gname = scanner.nextLine().trim();
+        if (gname.isEmpty()) { System.out.println("Group name required."); return; }
+        String gid = "g" + UUID.randomUUID().toString().substring(0,5);
+        AccountGroup g = new AccountGroup(gid, gname);
+        // attach global notifiers so children will also notify (AccountGroup.addObserver forwards to children)
+        g.addObserver(emailNotifier);
+        g.addObserver(smsNotifier);
+        accounts.put(gid, g);
+        System.out.println("Created group: " + gid + " (" + gname + ")");
+    }
+
+    // 11) Add account to group
+    private void cmdAddToGroup() {
+        System.out.print("Group id: ");
+        String gid = scanner.nextLine().trim();
+        Account grp = accounts.get(gid);
+        if (!(grp instanceof AccountGroup)) { System.out.println("Not a group id."); return; }
+        System.out.print("Account id to add: ");
+        String cid = scanner.nextLine().trim();
+        Account child = accounts.get(cid);
+        if (child == null) { System.out.println("No such account: " + cid); return; }
+        ((AccountGroup)grp).add(child);
+        // ensure child has notifiers too
+        child.addObserver(emailNotifier);
+        child.addObserver(smsNotifier);
+        System.out.println("Added " + cid + " to group " + gid);
+    }
+
+    // 12) Remove account from group
+    private void cmdRemoveFromGroup() {
+        System.out.print("Group id: ");
+        String gid = scanner.nextLine().trim();
+        Account grp = accounts.get(gid);
+        if (!(grp instanceof AccountGroup)) { System.out.println("Not a group id."); return; }
+        System.out.print("Account id to remove: ");
+        String cid = scanner.nextLine().trim();
+        Account child = accounts.get(cid);
+        if (child == null) { System.out.println("No such account: " + cid); return; }
+        ((AccountGroup)grp).remove(child);
+        System.out.println("Removed " + cid + " from group " + gid);
+    }
+
+    // 13) Deposit to group
+    private void cmdDepositToGroup() {
+        System.out.print("Group id: ");
+        String gid = scanner.nextLine().trim();
+        Account grp = accounts.get(gid);
+        if (!(grp instanceof AccountGroup)) { System.out.println("Not a group id."); return; }
+
+        System.out.print("Amount: ");
+        double amt;
+        try { amt = Double.parseDouble(scanner.nextLine().trim()); } catch(NumberFormatException e){ System.out.println("Invalid amount"); return; }
+
+        System.out.println("Deposit policy: 1) Even split  2) To single child");
+        String pol = scanner.nextLine().trim();
+        AccountGroup g = (AccountGroup) grp;
+        if ("1".equals(pol)) {
+            g.setDepositStrategy(new EvenSplitDeposit());
+        } else if ("2".equals(pol)) {
+            System.out.print("Target child id: ");
+            String cid = scanner.nextLine().trim();
+            Account child = accounts.get(cid);
+            if (child == null) { System.out.println("No such child: " + cid); return; }
+            g.setDepositStrategy(new SingleTargetDeposit(child));
+        } else {
+            System.out.println("Unknown policy"); return;
+        }
+        try {
+            g.deposit(amt);
+            System.out.println("Group deposit executed.");
+        } catch(Exception e){
+            System.out.println("Deposit failed: " + e.getMessage());
+        }
+    }
+
+    // 14) Withdraw from group
+    private void cmdWithdrawFromGroup() {
+        System.out.print("Group id: ");
+        String gid = scanner.nextLine().trim();
+        Account grp = accounts.get(gid);
+        if (!(grp instanceof AccountGroup)) { System.out.println("Not a group id."); return; }
+
+        System.out.print("Amount: ");
+        double amt;
+        try { amt = Double.parseDouble(scanner.nextLine().trim()); } catch(NumberFormatException e){ System.out.println("Invalid amount"); return; }
+
+        System.out.println("Withdraw policy: 1) Sequential (use balances in order)");
+        String pol = scanner.nextLine().trim();
+        AccountGroup g = (AccountGroup) grp;
+        if ("1".equals(pol)) {
+            g.setWithdrawStrategy(new SequentialWithdraw());
+        } else {
+            System.out.println("Unknown policy"); return;
+        }
+        try {
+            g.withdraw(amt);
+            System.out.println("Group withdraw executed.");
+        } catch (Exception e) {
+            System.out.println("Withdraw failed: " + e.getMessage());
+        }
+    }
+
+    // 15) Apply interest to group
+    private void cmdApplyInterestToGroup() {
+        System.out.print("Group id: ");
+        String gid = scanner.nextLine().trim();
+        Account grp = accounts.get(gid);
+        if (!(grp instanceof AccountGroup)) { System.out.println("Not a group id."); return; }
+
+        System.out.print("Months to compute interest for (integer): ");
+        int months;
+        try { months = Integer.parseInt(scanner.nextLine().trim()); } catch(NumberFormatException e){ System.out.println("Invalid months"); return; }
+
+        AccountGroup g = (AccountGroup) grp;
+
+        // DEBUG: print children and their runtime classes
+        System.out.println("Group children (debug):");
+        for (Account child : g.getChildren()) {
+            System.out.printf(" - id=%s name=%s runtimeClass=%s%n", child.getId(), child.getName(), child.getClass().getName());
+        }
+
+        // Strategy: use a configurable strategy (example uses SimpleInterestStrategy 1% yearly)
+        interest.InterestStrategy strat = new interest.SimpleInterestStrategy(1.0);
+        int applied = 0;
+
+        for (Account child : g.getChildren()) {
+            Account core = unwrapDecorators(child); // try to get the wrapped/original account
+            boolean appliedThis = false;
+
+            if (core instanceof accounts.SavingsAccount) {
+                double interestAmount = strat.computeInterest((accounts.SavingsAccount) core, months);
+                if (interestAmount > 0) {
+                    // deposit on the actual public API (so observers fire)
+                    core.deposit(interestAmount);
+                    applied++;
+                    appliedThis = true;
+                }
+            }
+
+            System.out.printf(" -> child %s (%s) => coreClass=%s applied=%s%n",
+                    child.getId(), child.getName(), core.getClass().getName(), appliedThis);
+        }
+
+        System.out.println("Applied interest to " + applied + " children where applicable.");
+    }
+
+    // helper: try to peel decorators to reach underlying account
+    private Account unwrapDecorators(Account a) {
+        Account cur = a;
+        // fast-path if we know AccountDecorator class exists in package accounts.decorators
+        try {
+            while (cur != null) {
+                Class<?> cls = cur.getClass();
+                String simple = cls.getSimpleName().toLowerCase();
+                // heuristic: decorator classes usually have 'Decorator' in name or are in accounts.decorators package
+                if (simple.endsWith("decorator") || cls.getPackageName().contains(".decorators")) {
+                    // try typed method getDelegate() or getWrapped() common convention
+                    try {
+                        java.lang.reflect.Method m = cls.getMethod("getDelegate");
+                        Object inner = m.invoke(cur);
+                        if (inner instanceof Account) { cur = (Account) inner; continue; }
+                    } catch (NoSuchMethodException ignored) {}
+                    try {
+                        java.lang.reflect.Method m2 = cls.getMethod("getWrapped");
+                        Object inner2 = m2.invoke(cur);
+                        if (inner2 instanceof Account) { cur = (Account) inner2; continue; }
+                    } catch (NoSuchMethodException ignored) {}
+                    // if no known getter, break and return current (cannot unwrap)
+                    break;
+                } else {
+                    break; // not a decorator by naming/packaging
+                }
+            }
+        } catch (Exception e) {
+            // on any reflection error, return original
+            return a;
+        }
+        return cur;
+    }
+
+
 }

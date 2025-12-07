@@ -13,6 +13,7 @@ import payment.PaymentService;
 import transactions.*;
 import security.AuthService;
 import security.Role;
+
 import customers.Ticket;
 import customers.TicketService;
 import admin.DashboardService;
@@ -39,16 +40,8 @@ public class BankApplication {
         SMSNotifier smsNotifier = new SMSNotifier("+12345");
 
         // ---------- Create accounts ----------
-        SavingsAccount s = (SavingsAccount) AccountFactory.createSavings("s1", "Alice", 10000);
-        CheckingAccount c = (CheckingAccount) AccountFactory.createChecking("c1", "Bob", 500);
-        LoanAccount loan = (LoanAccount) AccountFactory.createLoan("l1", "AliceLoan", 5000, 5.0);
-        InvestmentAccount inv = (InvestmentAccount) AccountFactory.createInvestment("i1", "AliceInvest", 15000, "balanced");
 
-        // attach default observers
-        s.addObserver(emailNotifier); s.addObserver(smsNotifier);
-        c.addObserver(emailNotifier); c.addObserver(smsNotifier);
-        loan.addObserver(emailNotifier);
-        inv.addObserver(emailNotifier);
+
 
         // ---------- Approval chain (Chain of Responsibility) ----------
         TransactionValidationHandler validation = new TransactionValidationHandler();
@@ -81,10 +74,7 @@ public class BankApplication {
 
         // ---------- Put accounts into a map for the InteractiveConsole ----------
         Map<String, Account> accountsMap = new LinkedHashMap<>();
-        accountsMap.put(s.getId(), s);
-        accountsMap.put(c.getId(), c);
-        accountsMap.put(loan.getId(), loan);
-        accountsMap.put(inv.getId(), inv);
+
 
         // ---------- Start Interactive CLI ----------
         InteractiveConsole console = new InteractiveConsole(accountsMap, txService, facade, auth, ticketService);
