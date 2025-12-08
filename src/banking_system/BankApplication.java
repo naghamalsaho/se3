@@ -77,7 +77,8 @@ public class BankApplication {
 
 
         // ---------- Start Interactive CLI ----------
-        InteractiveConsole console = new InteractiveConsole(accountsMap, txService, facade, auth, ticketService);
+        InteractiveConsole console = new InteractiveConsole(accountsMap, txService, facade, auth, ticketService, paymentService);
+
         console.start();
 
         // ---------- After CLI returns, optionally show summary and shutdown ----------

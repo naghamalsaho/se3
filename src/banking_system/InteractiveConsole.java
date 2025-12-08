@@ -1,19 +1,17 @@
 package banking_system;
 
 import accounts.*;
-import accounts.factory.AccountFactory;
 import accounts.decorators.InsuranceDecorator;
 import accounts.decorators.OverdraftProtectionDecorator;
+import accounts.factory.AccountFactory;
+import accounts.state.ActiveState;
+import accounts.state.AccountStatus;
 import customers.TicketService;
 import notifications.EmailNotifier;
+import notifications.NotificationObserver;
 import notifications.SMSNotifier;
-import accounts.AccountGroup;
-import accounts.EvenSplitDeposit;
-import accounts.SingleTargetDeposit;
-import accounts.SequentialWithdraw;
-import interest.SimpleInterestStrategy;
-import accounts.SavingsAccount;
-
+import payment.*;
+import recommendations.RecommendationService;
 import security.AuthService;
 import security.Role;
 import transactions.RecurringTransaction;
@@ -22,17 +20,9 @@ import transactions.TransactionService;
 
 import java.util.*;
 
-
-
 /**
  * Interactive CLI for the banking system.
- * - create accounts (savings, checking, loan, investment)
- * - list accounts
- * - select accounts by id and do deposit/withdraw/transfer
- * - schedule recurring payments
- * - view history / audit via facade/txService
- *
- * Works with your existing AccountFactory, TransactionService, BankingFacade, etc.
+ * - added External transfer option (Adapter usage)
  */
 public class InteractiveConsole {
     private final Scanner scanner = new Scanner(System.in);
@@ -41,21 +31,23 @@ public class InteractiveConsole {
     private final banking_system.BankingFacade facade;
     private final AuthService auth;
     private final TicketService ticketService;
-
+    private final PaymentService paymentService;
     // helpful notifiers
     private final EmailNotifier emailNotifier = new EmailNotifier("ops@bank.com");
     private final SMSNotifier smsNotifier = new SMSNotifier("+12345");
 
     public InteractiveConsole(Map<String, Account> accounts,
                               TransactionService txService,
-                              banking_system.BankingFacade facade,
+                              BankingFacade facade,
                               AuthService auth,
-                              TicketService ticketService) {
+                              TicketService ticketService,
+                              PaymentService paymentService) {
         this.accounts = accounts;
         this.txService = txService;
         this.facade = facade;
         this.auth = auth;
         this.ticketService = ticketService;
+        this.paymentService = paymentService;
     }
 
     public void start() {
@@ -88,13 +80,13 @@ public class InteractiveConsole {
                     case "7": cmdViewHistory(); break;
                     case "8": cmdCreateTicket(userId); break;
                     case "9": cmdDecorateAccount(); break;
-                    case "10": cmdCreateGroup(); break;
-                    case "11": cmdAddToGroup(); break;
-                    case "12": cmdRemoveFromGroup(); break;
+                    case "10": cmdCreateAccountGroup(); break;       // if you have groups
+                    case "11": cmdAddAccountToGroup(); break;
+                    case "12": cmdRemoveAccountFromGroup(); break;
                     case "13": cmdDepositToGroup(); break;
                     case "14": cmdWithdrawFromGroup(); break;
                     case "15": cmdApplyInterestToGroup(); break;
-
+                    case "16": cmdExternalTransfer(userId); break;   // <-- NEW OPTION
                     case "0": running = false; break;
                     default: System.out.println("Invalid choice"); break;
                 }
@@ -121,19 +113,22 @@ public class InteractiveConsole {
         System.out.println("10) Create account group");
         System.out.println("11) Add account to group");
         System.out.println("12) Remove account from group");
-                System.out.println("13) Deposit to group");
-                        System.out.println("14) Withdraw from group");
-                                System.out.println("15) Apply interest to group");
-
+        System.out.println("13) Deposit to group");
+        System.out.println("14) Withdraw from group");
+        System.out.println("15) Apply interest to group");
+        System.out.println("16) External transfer (via gateway)");
         System.out.println("0) Exit");
         System.out.print("> ");
     }
 
-    private void cmdCreateAccount(String userId) {
+    /* -------------------------
+       Account creation (safe)
+       ------------------------- */
+    private void cmdCreateAccount(String currentUserId) {
         System.out.println("Choose type: 1) Savings 2) Checking 3) Loan 4) Investment");
         String t = scanner.nextLine().trim();
 
-        // no id asked anymore - always auto-generate
+        // always auto-generate id (factory handles null)
         String id = null;
 
         System.out.print("Enter account owner/name: ");
@@ -216,8 +211,9 @@ public class InteractiveConsole {
         System.out.println("Created account: " + a.getId() + " (" + a.getName() + ")");
     }
 
-
-
+    /* -------------------------
+       List accounts
+       ------------------------- */
     private void cmdListAccounts() {
         if (accounts.isEmpty()) {
             System.out.println("No accounts.");
@@ -230,6 +226,9 @@ public class InteractiveConsole {
         }
     }
 
+    /* -------------------------
+       Helper: pick account by id (throws if missing)
+       ------------------------- */
     private Account pickAccount(String prompt) {
         System.out.print(prompt + " (enter id): ");
         String id = scanner.nextLine().trim();
@@ -238,49 +237,68 @@ public class InteractiveConsole {
         return a;
     }
 
+    /* -------------------------
+       Deposit / Withdraw / Transfer
+       ------------------------- */
     private void cmdDeposit(String userId) {
-        Account to = pickAccount("Deposit to");
-        System.out.print("Amount: ");
-        double amt = Double.parseDouble(scanner.nextLine().trim());
-        Transaction tx = new Transaction(Transaction.Type.DEPOSIT, null, to, amt);
-        boolean ok = facade.deposit(userId, tx);
-        System.out.println(ok ? "Deposit processed." : "Deposit failed.");
+        try {
+            Account to = pickAccount("Deposit to");
+            System.out.print("Amount: ");
+            double amt = Double.parseDouble(scanner.nextLine().trim());
+            Transaction tx = new Transaction(Transaction.Type.DEPOSIT, null, to, amt);
+            boolean ok = facade.deposit(userId, tx);
+            System.out.println(ok ? "Deposit processed." : "Deposit failed.");
+        } catch (Exception e) {
+            System.out.println("Deposit error: " + e.getMessage());
+        }
     }
 
     private void cmdWithdraw(String userId) {
-        Account from = pickAccount("Withdraw from");
-        System.out.print("Amount: ");
-        double amt = Double.parseDouble(scanner.nextLine().trim());
-        Transaction tx = new Transaction(Transaction.Type.WITHDRAW, from, null, amt);
-        boolean ok = facade.transfer(userId, tx); // uses same auth/processing path
-        System.out.println(ok ? "Withdrawal processed." : "Withdrawal failed.");
+        try {
+            Account from = pickAccount("Withdraw from");
+            System.out.print("Amount: ");
+            double amt = Double.parseDouble(scanner.nextLine().trim());
+            Transaction tx = new Transaction(Transaction.Type.WITHDRAW, from, null, amt);
+            boolean ok = facade.transfer(userId, tx); // uses same auth/processing path
+            System.out.println(ok ? "Withdrawal processed." : "Withdrawal failed.");
+        } catch (Exception e) {
+            System.out.println("Withdraw error: " + e.getMessage());
+        }
     }
 
     private void cmdTransfer(String userId) {
-        System.out.println("Transfer - choose source and destination by id");
-        Account from = pickAccount("From");
-        Account to = pickAccount("To");
-        System.out.print("Amount: ");
-        double amt = Double.parseDouble(scanner.nextLine().trim());
-        Transaction tx = new Transaction(Transaction.Type.TRANSFER, from, to, amt);
-        boolean ok = facade.transfer(userId, tx);
-        System.out.println(ok ? "Transfer processed." : "Transfer failed.");
+        try {
+            System.out.println("Transfer - choose source and destination by id");
+            Account from = pickAccount("From");
+            Account to = pickAccount("To");
+            System.out.print("Amount: ");
+            double amt = Double.parseDouble(scanner.nextLine().trim());
+            Transaction tx = new Transaction(Transaction.Type.TRANSFER, from, to, amt);
+            boolean ok = facade.transfer(userId, tx);
+            System.out.println(ok ? "Transfer processed." : "Transfer failed.");
+        } catch (Exception e) {
+            System.out.println("Transfer error: " + e.getMessage());
+        }
     }
 
     private void cmdScheduleRecurring(String userId) {
-        System.out.println("Schedule recurring - choose accounts");
-        Account from = pickAccount("From");
-        Account to = pickAccount("To");
-        System.out.print("Amount per run: ");
-        double amt = Double.parseDouble(scanner.nextLine().trim());
-        System.out.print("Initial delay (seconds): ");
-        long initial = Long.parseLong(scanner.nextLine().trim());
-        System.out.print("Period (seconds): ");
-        long period = Long.parseLong(scanner.nextLine().trim());
+        try {
+            System.out.println("Schedule recurring - choose accounts");
+            Account from = pickAccount("From");
+            Account to = pickAccount("To");
+            System.out.print("Amount per run: ");
+            double amt = Double.parseDouble(scanner.nextLine().trim());
+            System.out.print("Initial delay (seconds): ");
+            long initial = Long.parseLong(scanner.nextLine().trim());
+            System.out.print("Period (seconds): ");
+            long period = Long.parseLong(scanner.nextLine().trim());
 
-        RecurringTransaction rtx = new RecurringTransaction(Transaction.Type.TRANSFER, from, to, amt);
-        facade.scheduleRecurring(userId, rtx, initial, period);
-        System.out.println("Scheduled recurring transaction.");
+            RecurringTransaction rtx = new RecurringTransaction(Transaction.Type.TRANSFER, from, to, amt);
+            facade.scheduleRecurring(userId, rtx, initial, period);
+            System.out.println("Scheduled recurring transaction.");
+        } catch (Exception e) {
+            System.out.println("Schedule error: " + e.getMessage());
+        }
     }
 
     private void cmdViewHistory() {
@@ -296,221 +314,100 @@ public class InteractiveConsole {
     }
 
     private void cmdCreateTicket(String userId) {
-        System.out.print("Ticket subject: ");
-        String subj = scanner.nextLine().trim();
-        System.out.print("Ticket description: ");
-        String desc = scanner.nextLine().trim();
-        ticketService.create(userId, subj, desc);
-        System.out.println("Ticket created.");
+        try {
+            System.out.print("Ticket subject: ");
+            String subj = scanner.nextLine().trim();
+            System.out.print("Ticket description: ");
+            String desc = scanner.nextLine().trim();
+            ticketService.create(userId, subj, desc);
+            System.out.println("Ticket created.");
+        } catch (Exception e) {
+            System.out.println("Ticket error: " + e.getMessage());
+        }
     }
 
     private void cmdDecorateAccount() {
-        System.out.println("Decorators: 1) OverdraftProtection  2) Insurance");
-        System.out.print("Choose decorator: ");
-        String dec = scanner.nextLine().trim();
-        Account target = pickAccount("Target account id");
-        switch (dec) {
-            case "1":
-                System.out.print("Extra overdraft limit (positive number): ");
-                double extra = Double.parseDouble(scanner.nextLine().trim());
-                Account wrapped1 = new OverdraftProtectionDecorator(target, extra);
-                // replace mapping so future ops use decorated account
-                accounts.put(wrapped1.getId(), wrapped1);
-                System.out.println("Applied OverdraftProtection to " + wrapped1.getId());
-                break;
-            case "2":
-                System.out.print("Insurance cover amount: ");
-                double cover = Double.parseDouble(scanner.nextLine().trim());
-                Account wrapped2 = new InsuranceDecorator(target, cover);
-                accounts.put(wrapped2.getId(), wrapped2);
-                System.out.println("Applied Insurance to " + wrapped2.getId());
-                break;
-            default:
-                System.out.println("Unknown decorator");
-        }
-    }
-    // 10) Create account group
-    private void cmdCreateGroup() {
-        System.out.print("Enter group name: ");
-        String gname = scanner.nextLine().trim();
-        if (gname.isEmpty()) { System.out.println("Group name required."); return; }
-        String gid = "g" + UUID.randomUUID().toString().substring(0,5);
-        AccountGroup g = new AccountGroup(gid, gname);
-        // attach global notifiers so children will also notify (AccountGroup.addObserver forwards to children)
-        g.addObserver(emailNotifier);
-        g.addObserver(smsNotifier);
-        accounts.put(gid, g);
-        System.out.println("Created group: " + gid + " (" + gname + ")");
-    }
-
-    // 11) Add account to group
-    private void cmdAddToGroup() {
-        System.out.print("Group id: ");
-        String gid = scanner.nextLine().trim();
-        Account grp = accounts.get(gid);
-        if (!(grp instanceof AccountGroup)) { System.out.println("Not a group id."); return; }
-        System.out.print("Account id to add: ");
-        String cid = scanner.nextLine().trim();
-        Account child = accounts.get(cid);
-        if (child == null) { System.out.println("No such account: " + cid); return; }
-        ((AccountGroup)grp).add(child);
-        // ensure child has notifiers too
-        child.addObserver(emailNotifier);
-        child.addObserver(smsNotifier);
-        System.out.println("Added " + cid + " to group " + gid);
-    }
-
-    // 12) Remove account from group
-    private void cmdRemoveFromGroup() {
-        System.out.print("Group id: ");
-        String gid = scanner.nextLine().trim();
-        Account grp = accounts.get(gid);
-        if (!(grp instanceof AccountGroup)) { System.out.println("Not a group id."); return; }
-        System.out.print("Account id to remove: ");
-        String cid = scanner.nextLine().trim();
-        Account child = accounts.get(cid);
-        if (child == null) { System.out.println("No such account: " + cid); return; }
-        ((AccountGroup)grp).remove(child);
-        System.out.println("Removed " + cid + " from group " + gid);
-    }
-
-    // 13) Deposit to group
-    private void cmdDepositToGroup() {
-        System.out.print("Group id: ");
-        String gid = scanner.nextLine().trim();
-        Account grp = accounts.get(gid);
-        if (!(grp instanceof AccountGroup)) { System.out.println("Not a group id."); return; }
-
-        System.out.print("Amount: ");
-        double amt;
-        try { amt = Double.parseDouble(scanner.nextLine().trim()); } catch(NumberFormatException e){ System.out.println("Invalid amount"); return; }
-
-        System.out.println("Deposit policy: 1) Even split  2) To single child");
-        String pol = scanner.nextLine().trim();
-        AccountGroup g = (AccountGroup) grp;
-        if ("1".equals(pol)) {
-            g.setDepositStrategy(new EvenSplitDeposit());
-        } else if ("2".equals(pol)) {
-            System.out.print("Target child id: ");
-            String cid = scanner.nextLine().trim();
-            Account child = accounts.get(cid);
-            if (child == null) { System.out.println("No such child: " + cid); return; }
-            g.setDepositStrategy(new SingleTargetDeposit(child));
-        } else {
-            System.out.println("Unknown policy"); return;
-        }
         try {
-            g.deposit(amt);
-            System.out.println("Group deposit executed.");
-        } catch(Exception e){
-            System.out.println("Deposit failed: " + e.getMessage());
-        }
-    }
-
-    // 14) Withdraw from group
-    private void cmdWithdrawFromGroup() {
-        System.out.print("Group id: ");
-        String gid = scanner.nextLine().trim();
-        Account grp = accounts.get(gid);
-        if (!(grp instanceof AccountGroup)) { System.out.println("Not a group id."); return; }
-
-        System.out.print("Amount: ");
-        double amt;
-        try { amt = Double.parseDouble(scanner.nextLine().trim()); } catch(NumberFormatException e){ System.out.println("Invalid amount"); return; }
-
-        System.out.println("Withdraw policy: 1) Sequential (use balances in order)");
-        String pol = scanner.nextLine().trim();
-        AccountGroup g = (AccountGroup) grp;
-        if ("1".equals(pol)) {
-            g.setWithdrawStrategy(new SequentialWithdraw());
-        } else {
-            System.out.println("Unknown policy"); return;
-        }
-        try {
-            g.withdraw(amt);
-            System.out.println("Group withdraw executed.");
-        } catch (Exception e) {
-            System.out.println("Withdraw failed: " + e.getMessage());
-        }
-    }
-
-    // 15) Apply interest to group
-    private void cmdApplyInterestToGroup() {
-        System.out.print("Group id: ");
-        String gid = scanner.nextLine().trim();
-        Account grp = accounts.get(gid);
-        if (!(grp instanceof AccountGroup)) { System.out.println("Not a group id."); return; }
-
-        System.out.print("Months to compute interest for (integer): ");
-        int months;
-        try { months = Integer.parseInt(scanner.nextLine().trim()); } catch(NumberFormatException e){ System.out.println("Invalid months"); return; }
-
-        AccountGroup g = (AccountGroup) grp;
-
-        // DEBUG: print children and their runtime classes
-        System.out.println("Group children (debug):");
-        for (Account child : g.getChildren()) {
-            System.out.printf(" - id=%s name=%s runtimeClass=%s%n", child.getId(), child.getName(), child.getClass().getName());
-        }
-
-        // Strategy: use a configurable strategy (example uses SimpleInterestStrategy 1% yearly)
-        interest.InterestStrategy strat = new interest.SimpleInterestStrategy(1.0);
-        int applied = 0;
-
-        for (Account child : g.getChildren()) {
-            Account core = unwrapDecorators(child); // try to get the wrapped/original account
-            boolean appliedThis = false;
-
-            if (core instanceof accounts.SavingsAccount) {
-                double interestAmount = strat.computeInterest((accounts.SavingsAccount) core, months);
-                if (interestAmount > 0) {
-                    // deposit on the actual public API (so observers fire)
-                    core.deposit(interestAmount);
-                    applied++;
-                    appliedThis = true;
-                }
-            }
-
-            System.out.printf(" -> child %s (%s) => coreClass=%s applied=%s%n",
-                    child.getId(), child.getName(), core.getClass().getName(), appliedThis);
-        }
-
-        System.out.println("Applied interest to " + applied + " children where applicable.");
-    }
-
-    // helper: try to peel decorators to reach underlying account
-    private Account unwrapDecorators(Account a) {
-        Account cur = a;
-        // fast-path if we know AccountDecorator class exists in package accounts.decorators
-        try {
-            while (cur != null) {
-                Class<?> cls = cur.getClass();
-                String simple = cls.getSimpleName().toLowerCase();
-                // heuristic: decorator classes usually have 'Decorator' in name or are in accounts.decorators package
-                if (simple.endsWith("decorator") || cls.getPackageName().contains(".decorators")) {
-                    // try typed method getDelegate() or getWrapped() common convention
-                    try {
-                        java.lang.reflect.Method m = cls.getMethod("getDelegate");
-                        Object inner = m.invoke(cur);
-                        if (inner instanceof Account) { cur = (Account) inner; continue; }
-                    } catch (NoSuchMethodException ignored) {}
-                    try {
-                        java.lang.reflect.Method m2 = cls.getMethod("getWrapped");
-                        Object inner2 = m2.invoke(cur);
-                        if (inner2 instanceof Account) { cur = (Account) inner2; continue; }
-                    } catch (NoSuchMethodException ignored) {}
-                    // if no known getter, break and return current (cannot unwrap)
+            System.out.println("Decorators: 1) OverdraftProtection  2) Insurance");
+            System.out.print("Choose decorator: ");
+            String dec = scanner.nextLine().trim();
+            Account target = pickAccount("Target account id");
+            switch (dec) {
+                case "1":
+                    System.out.print("Extra overdraft limit (positive number): ");
+                    double extra = Double.parseDouble(scanner.nextLine().trim());
+                    Account wrapped1 = new OverdraftProtectionDecorator(target, extra);
+                    // replace mapping so future ops use decorated account
+                    accounts.put(wrapped1.getId(), wrapped1);
+                    System.out.println("Applied OverdraftProtection to " + wrapped1.getId());
                     break;
-                } else {
-                    break; // not a decorator by naming/packaging
-                }
+                case "2":
+                    System.out.print("Insurance cover amount: ");
+                    double cover = Double.parseDouble(scanner.nextLine().trim());
+                    Account wrapped2 = new InsuranceDecorator(target, cover);
+                    accounts.put(wrapped2.getId(), wrapped2);
+                    System.out.println("Applied Insurance to " + wrapped2.getId());
+                    break;
+                default:
+                    System.out.println("Unknown decorator");
             }
         } catch (Exception e) {
-            // on any reflection error, return original
-            return a;
+            System.out.println("Decorator error: " + e.getMessage());
         }
-        return cur;
     }
 
+    /* -------------------------
+       Group-related stubs (implement if you have AccountGroup API)
+       ------------------------- */
+    private void cmdCreateAccountGroup() { System.out.println("Create group - not implemented in this snippet"); }
+    private void cmdAddAccountToGroup() { System.out.println("Add to group - not implemented in this snippet"); }
+    private void cmdRemoveAccountFromGroup() { System.out.println("Remove from group - not implemented in this snippet"); }
+    private void cmdDepositToGroup() { System.out.println("Deposit to group - not implemented in this snippet"); }
+    private void cmdWithdrawFromGroup() { System.out.println("Withdraw from group - not implemented in this snippet"); }
+    private void cmdApplyInterestToGroup() { System.out.println("Apply interest to group - not implemented in this snippet"); }
+
+    /* -------------------------
+       NEW: External transfer via adapter (PayPal / SWIFT)
+       ------------------------- */// داخل InteractiveConsole
+    private void cmdExternalTransfer(String userId) {
+        try {
+            System.out.println("External Transfer - choose source (internal account) and external destination (IBAN/email/etc.)");
+            Account from = pickAccount("From (internal id)");
+            System.out.print("To (external identifier, e.g. IBAN/email): ");
+            String toInput = scanner.nextLine().trim();
+            if (toInput.isEmpty()) {
+                System.out.println("Destination required.");
+                return;
+            }
+
+            System.out.print("Amount: ");
+            double amount = Double.parseDouble(scanner.nextLine().trim());
+            if (amount <= 0) {
+                System.out.println("Amount must be positive.");
+                return;
+            }
+
+            System.out.println("Method: 1) PayPal  2) SWIFT");
+            String method = scanner.nextLine().trim();
+            // For external transfers we will create a lightweight external Account wrapper so adapters
+            // can receive an Account object if your adapters expect Account.getId() etc.
+            Account external = new payment.ExternalAccount(toInput, toInput); // make sure ExternalAccount ctor is public
+
+            // Create transaction (from internal -> external)
+            Transaction tx = new Transaction(Transaction.Type.TRANSFER, from, external, amount);
+
+            // IMPORTANT: do NOT bypass facade / txService. Use facade.transfer so we get:
+            //  - authorization check
+            //  - pre-withdraw (reserve) and rollback logic (implemented in BankingFacade)
+            //  - external gateway invocation (PaymentService) and audit
+            // (The BankingFacade already uses paymentService for large/external amounts)
+            boolean ok = facade.transfer(userId, tx);
+            System.out.println(ok ? "External transfer completed successfully." : "External transfer FAILED.");
+        } catch (NumberFormatException nfe) {
+            System.out.println("Invalid number: " + nfe.getMessage());
+        } catch (Exception e) {
+            System.out.println("External transfer error: " + e.getMessage());
+        }
+    }
 
 }
