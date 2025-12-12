@@ -1,9 +1,7 @@
 package banking_system;
 
 import accounts.*;
-import accounts.decorators.InsuranceDecorator;
-import accounts.decorators.OverdraftProtectionDecorator;
-import accounts.factory.AccountFactory;
+
 import notifications.EmailNotifier;
 import notifications.SMSNotifier;
 import payment.PayPalAdapter;
@@ -77,7 +75,7 @@ public class BankApplication {
 
 
         // ---------- Start Interactive CLI ----------
-        InteractiveConsole console = new InteractiveConsole(accountsMap, txService, facade, auth, ticketService, paymentService);
+        InteractiveConsole console = new InteractiveConsole(accountsMap, txService, facade, auth, ticketService);
 
         console.start();
 

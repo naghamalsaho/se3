@@ -1,12 +1,26 @@
 package admin;
+
 import transactions.AuditLog;
-import java.util.List;
 
 public class ReportingService {
     private final AuditLog audit;
-    public ReportingService(AuditLog audit){ this.audit = audit; }
+
+    public ReportingService(AuditLog audit){
+        this.audit = audit;
+    }
+
     public void dailyReport(){
         System.out.println("=== Daily Audit Log ===");
-        audit.getEntries().forEach(e -> System.out.println(e.timestamp + " " + e.status + " " + e.tx.getAmount()));
+
+        audit.getEntries().forEach(e -> {
+            String ts = e.getTimestamp().toString();
+            String action = e.getAction();
+            double amount = e.getAmount(); // <-- استخدم getter الصحيح
+            String from = e.getFrom();
+            String to = e.getTo();
+            String note = e.getNote();
+
+            System.out.println(ts + " " + action + " " + from + " -> " + to + " : " + String.format("%.2f", amount) + (note == null ? "" : " - " + note));
+        });
     }
 }

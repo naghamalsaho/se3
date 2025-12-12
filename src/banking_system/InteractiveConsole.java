@@ -4,62 +4,66 @@ import accounts.*;
 import accounts.decorators.InsuranceDecorator;
 import accounts.decorators.OverdraftProtectionDecorator;
 import accounts.factory.AccountFactory;
-import accounts.state.ActiveState;
-import accounts.state.AccountStatus;
 import customers.TicketService;
 import notifications.EmailNotifier;
-import notifications.NotificationObserver;
 import notifications.SMSNotifier;
-import payment.*;
+import payment.PayPalApi;
+import payment.PayPalAdapter;
+import payment.PaymentGateway;
+import payment.PaymentService;
 import recommendations.RecommendationService;
 import security.AuthService;
 import security.Role;
+import transactions.AuditLog;
 import transactions.RecurringTransaction;
 import transactions.Transaction;
 import transactions.TransactionService;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Interactive CLI for the banking system.
- * - added External transfer option (Adapter usage)
+ * ملاحظة: تمّت إزالة طلب السرّ للأدمن — الآن هناك حساب ثابت "admin".
+ * هذا الملف مُحدَّث: تصحيح دوال الغروبات، صلاحيات، واستخدام facade بشكل صحيح.
  */
 public class InteractiveConsole {
     private final Scanner scanner = new Scanner(System.in);
     private final Map<String, Account> accounts; // id -> Account
     private final TransactionService txService;
-    private final banking_system.BankingFacade facade;
+    private final BankingFacade facade;
     private final AuthService auth;
     private final TicketService ticketService;
-    private final PaymentService paymentService;
-    // helpful notifiers
+    private static final String ADMIN_SECRET = "admin"; // غيّري إذا بدك
+    private static final String ADMIN_USER = "admin";
+    // notifiers
+
     private final EmailNotifier emailNotifier = new EmailNotifier("ops@bank.com");
     private final SMSNotifier smsNotifier = new SMSNotifier("+12345");
+    // new: groups storage (id -> set of account ids)
+    private final Map<String, accounts.AccountGroup> groups = new ConcurrentHashMap<>();
+    private final Random idGen = new Random();
 
     public InteractiveConsole(Map<String, Account> accounts,
                               TransactionService txService,
                               BankingFacade facade,
                               AuthService auth,
-                              TicketService ticketService,
-                              PaymentService paymentService) {
+                              TicketService ticketService) {
         this.accounts = accounts;
         this.txService = txService;
         this.facade = facade;
         this.auth = auth;
         this.ticketService = ticketService;
-        this.paymentService = paymentService;
     }
 
     public void start() {
+        // ensure fixed admin user exists in AuthService? we'll register on demand
         System.out.println("=== Welcome to the Interactive Bank CLI ===");
-        System.out.print("Login userId (or press Enter to use 'guest'): ");
-        String userId = scanner.nextLine().trim();
-        if (userId.isEmpty()) userId = "guest";
-
-        // ensure user registered
-        if (!auth.authorize(userId, Role.CUSTOMER)) {
-            auth.register(userId, Role.CUSTOMER);
-            System.out.println("Registered user as CUSTOMER: " + userId);
+        // نفتح القائمة فوراً كمستخدم افتراضي ("customer") — هذا المُستخدم يمكن تغييره لاحقاً
+        String currentUserId = "customer";
+        // Ensure default user registered as CUSTOMER (idempotent)
+        if (!auth.authorize(currentUserId, Role.CUSTOMER)) {
+            auth.register(currentUserId, Role.CUSTOMER);
         }
 
         // attach notifiers by default to existing accounts
@@ -67,28 +71,47 @@ public class InteractiveConsole {
 
         boolean running = true;
         while (running) {
-            printMainMenu();
+            printMainMenu(currentUserId);
             String choice = scanner.nextLine().trim();
             try {
-                switch (choice) {
-                    case "1": cmdCreateAccount(userId); break;
+                switch (choice.toLowerCase()) {
+                    case "1": cmdCreateAccount(currentUserId); break;
                     case "2": cmdListAccounts(); break;
-                    case "3": cmdDeposit(userId); break;
-                    case "4": cmdWithdraw(userId); break;
-                    case "5": cmdTransfer(userId); break;
-                    case "6": cmdScheduleRecurring(userId); break;
+                    case "3": cmdDeposit(currentUserId); break;
+                    case "4": cmdWithdraw(currentUserId); break;
+                    case "5": cmdTransfer(currentUserId); break;
+                    case "6": cmdScheduleRecurring(currentUserId); break;
                     case "7": cmdViewHistory(); break;
-                    case "8": cmdCreateTicket(userId); break;
+                    case "8": cmdCreateTicket(currentUserId); break;
                     case "9": cmdDecorateAccount(); break;
-                    case "10": cmdCreateAccountGroup(); break;       // if you have groups
-                    case "11": cmdAddAccountToGroup(); break;
-                    case "12": cmdRemoveAccountFromGroup(); break;
-                    case "13": cmdDepositToGroup(); break;
-                    case "14": cmdWithdrawFromGroup(); break;
-                    case "15": cmdApplyInterestToGroup(); break;
-                    case "16": cmdExternalTransfer(userId); break;   // <-- NEW OPTION
-                    case "0": running = false; break;
-                    default: System.out.println("Invalid choice"); break;
+                    case "10": cmdCreateAccountGroup(currentUserId); break;
+                    case "11": cmdAddAccountToGroup(currentUserId); break;
+                    case "12": cmdRemoveAccountFromGroup(currentUserId); break;
+                    case "13": cmdDepositToGroup(currentUserId); break;
+                    case "14": cmdWithdrawFromGroup(currentUserId); break;
+                    case "15": cmdApplyInterestToGroup(currentUserId); break;
+                    case "16": cmdExternalTransfer(currentUserId); break;
+                    case "d":
+                    case "admin":
+                        System.out.print("Enter admin secret: ");
+                        String secret = scanner.nextLine().trim();
+                        if (ADMIN_SECRET.equals(secret)) {
+                            // Ensure admin user is registered with ADMIN role (idempotent)
+                            if (!auth.authorize(ADMIN_USER, Role.ADMIN)) {
+                                auth.register(ADMIN_USER, Role.ADMIN);
+                                System.out.println("Admin account registered as: " + ADMIN_USER);
+                            }
+                            // now open dashboard as the admin user
+                            cmdAdminDashboard(ADMIN_USER);
+                        } else {
+                            System.out.println("Unauthorized: invalid admin secret.");
+                        }
+                        break;
+                    case "0":
+                        running = false;
+                        break;
+                    default:
+                        System.out.println("Invalid choice");
                 }
             } catch (Exception e) {
                 System.out.println("Error: " + e.getMessage());
@@ -99,7 +122,7 @@ public class InteractiveConsole {
         System.out.println("Exiting CLI. Bye!");
     }
 
-    private void printMainMenu() {
+    private void printMainMenu(String userId) {
         System.out.println("Menu:");
         System.out.println("1) Create account");
         System.out.println("2) List accounts");
@@ -117,20 +140,20 @@ public class InteractiveConsole {
         System.out.println("14) Withdraw from group");
         System.out.println("15) Apply interest to group");
         System.out.println("16) External transfer (via gateway)");
+        // hint for admin entry
+        System.out.println("D) Admin dashboard (requires admin secret)");
         System.out.println("0) Exit");
         System.out.print("> ");
     }
 
     /* -------------------------
-       Account creation (safe)
+       Account creation & basic operations
+       (auto-id via factory)
        ------------------------- */
     private void cmdCreateAccount(String currentUserId) {
         System.out.println("Choose type: 1) Savings 2) Checking 3) Loan 4) Investment");
         String t = scanner.nextLine().trim();
-
-        // always auto-generate id (factory handles null)
         String id = null;
-
         System.out.print("Enter account owner/name: ");
         String name = scanner.nextLine().trim();
         if (name.isEmpty()) {
@@ -148,7 +171,7 @@ public class InteractiveConsole {
             return;
         }
 
-        // check owner name uniqueness (case-insensitive)
+        // check owner name uniqueness
         boolean nameExists = accounts.values().stream()
                 .anyMatch(a -> a.getName() != null && a.getName().trim().toLowerCase().equals(nameKey));
         if (nameExists) {
@@ -156,7 +179,6 @@ public class InteractiveConsole {
             return;
         }
 
-        // create via factory (pass null id to auto-generate)
         Account a;
         try {
             switch (t) {
@@ -186,49 +208,67 @@ public class InteractiveConsole {
             return;
         }
 
-        // try atomic insertion by id to avoid race on generated id
         Account existing = accounts.putIfAbsent(a.getId(), a);
         if (existing != null) {
             System.out.println("Cannot register account: generated id conflict: " + a.getId());
             return;
         }
 
-        // double-check name uniqueness (race-safe): if some other thread added same name meanwhile, rollback
         boolean nameConflictAfter = accounts.values().stream()
                 .filter(acc -> !acc.getId().equals(a.getId()))
                 .anyMatch(acc -> acc.getName() != null && acc.getName().trim().toLowerCase().equals(nameKey));
         if (nameConflictAfter) {
-            // rollback insertion
             accounts.remove(a.getId(), a);
             System.out.println("Cannot create account: owner name was taken concurrently: " + name);
             return;
         }
 
-        // attach observers and finish
         a.addObserver(emailNotifier);
         a.addObserver(smsNotifier);
 
         System.out.println("Created account: " + a.getId() + " (" + a.getName() + ")");
     }
 
-    /* -------------------------
-       List accounts
-       ------------------------- */
     private void cmdListAccounts() {
-        if (accounts.isEmpty()) {
+        // accounts table
+        if (accounts == null || accounts.isEmpty()) {
             System.out.println("No accounts.");
+        } else {
+            System.out.println("Accounts:");
+            System.out.printf("%-8s %-20s %-12s %-10s%n", "ID", "Owner", "Balance", "Status");
+            accounts.values().stream()
+                    .sorted(Comparator.comparing(Account::getId))
+                    .forEach(a -> {
+                        System.out.printf("%-8s %-20s %-12.2f %-10s%n",
+                                a.getId(),
+                                a.getName(),
+                                a.getBalance(),
+                                a.getStatusName());
+                    });
+        }
+
+        System.out.println(); // separator
+
+        // groups summary
+        if (groups == null || groups.isEmpty()) {
+            System.out.println("Groups: (none)");
             return;
         }
-        System.out.println("Accounts:");
-        for (Account a : accounts.values()) {
-            System.out.printf("- id=%s name=%s balance=%.2f status=%s%n",
-                    a.getId(), a.getName(), a.getBalance(), a.getStatusName());
-        }
+
+        System.out.println("Groups:");
+        // sort by group id for stable output
+        // عندما تطبعين المجموعات:
+        groups.keySet().stream().sorted().forEach(gid -> {
+            accounts.AccountGroup ag = groups.get(gid);
+            List<Account> members = ag.getChildren();
+            System.out.printf("- Group %s : %d member(s)%n", gid, members.size());
+            members.forEach(a -> System.out.printf("    - %-6s owner=%-16s bal=%8.2f status=%s%n",
+                    a.getId(), a.getName(), a.getBalance(), a.getStatusName()));
+        });
+
+
     }
 
-    /* -------------------------
-       Helper: pick account by id (throws if missing)
-       ------------------------- */
     private Account pickAccount(String prompt) {
         System.out.print(prompt + " (enter id): ");
         String id = scanner.nextLine().trim();
@@ -237,9 +277,6 @@ public class InteractiveConsole {
         return a;
     }
 
-    /* -------------------------
-       Deposit / Withdraw / Transfer
-       ------------------------- */
     private void cmdDeposit(String userId) {
         try {
             Account to = pickAccount("Deposit to");
@@ -259,7 +296,7 @@ public class InteractiveConsole {
             System.out.print("Amount: ");
             double amt = Double.parseDouble(scanner.nextLine().trim());
             Transaction tx = new Transaction(Transaction.Type.WITHDRAW, from, null, amt);
-            boolean ok = facade.transfer(userId, tx); // uses same auth/processing path
+            boolean ok = facade.transfer(userId, tx);
             System.out.println(ok ? "Withdrawal processed." : "Withdrawal failed.");
         } catch (Exception e) {
             System.out.println("Withdraw error: " + e.getMessage());
@@ -304,7 +341,10 @@ public class InteractiveConsole {
     private void cmdViewHistory() {
         System.out.println("Transaction history:");
         List<Transaction> history = txService.getHistory();
-        if (history.isEmpty()) System.out.println(" - none -");
+        if (history == null || history.isEmpty()) {
+            System.out.println(" - none -");
+            return;
+        }
         for (Transaction t : history) {
             System.out.printf("- %s %s -> %s : %.2f%n", t.getType(),
                     t.getFrom() != null ? t.getFrom().getId() : "external",
@@ -337,7 +377,6 @@ public class InteractiveConsole {
                     System.out.print("Extra overdraft limit (positive number): ");
                     double extra = Double.parseDouble(scanner.nextLine().trim());
                     Account wrapped1 = new OverdraftProtectionDecorator(target, extra);
-                    // replace mapping so future ops use decorated account
                     accounts.put(wrapped1.getId(), wrapped1);
                     System.out.println("Applied OverdraftProtection to " + wrapped1.getId());
                     break;
@@ -356,55 +395,399 @@ public class InteractiveConsole {
         }
     }
 
-    /* -------------------------
-       Group-related stubs (implement if you have AccountGroup API)
-       ------------------------- */
-    private void cmdCreateAccountGroup() { System.out.println("Create group - not implemented in this snippet"); }
-    private void cmdAddAccountToGroup() { System.out.println("Add to group - not implemented in this snippet"); }
-    private void cmdRemoveAccountFromGroup() { System.out.println("Remove from group - not implemented in this snippet"); }
-    private void cmdDepositToGroup() { System.out.println("Deposit to group - not implemented in this snippet"); }
-    private void cmdWithdrawFromGroup() { System.out.println("Withdraw from group - not implemented in this snippet"); }
-    private void cmdApplyInterestToGroup() { System.out.println("Apply interest to group - not implemented in this snippet"); }
+    // -------------------------
+    // Group operations (all accept userId for auth checks)
+    // -------------------------
+
+    // 10) Create group
+    private void cmdCreateAccountGroup(String userId) {
+        System.out.print("Create group - enter group name/label: ");
+        String label = scanner.nextLine().trim();
+        if (label.isEmpty()) { System.out.println("Group name required."); return; }
+        String gid;
+        do {
+            gid = "g" + (10000 + idGen.nextInt(90000));
+        } while (groups.containsKey(gid) || accounts.containsKey(gid));
+        accounts.AccountGroup ag = new accounts.AccountGroup(gid, label);
+        groups.put(gid, ag);
+        accounts.put(gid, ag); // so it appears in account listing
+        ag.addObserver(emailNotifier);
+        ag.addObserver(smsNotifier);
+        System.out.println("Group created: " + gid + " (" + label + ")");
+    }
+
+
+
+    // 11) Add account to group
+    private void cmdAddAccountToGroup(String userId) {
+        System.out.print("Group id: ");
+        String gid = scanner.nextLine().trim();
+        accounts.AccountGroup ag = groups.get(gid);
+        if (ag == null) { System.out.println("Unknown group: " + gid); return; }
+
+        System.out.print("Account id to add: ");
+        String aid = scanner.nextLine().trim();
+        Account a = accounts.get(aid);
+        if (a == null) { System.out.println("No account with id: " + aid); return; }
+
+        // require account ACTIVE (حسب منطقك القديم)
+        if (!"ACTIVE".equalsIgnoreCase(a.getStatusName())) {
+            System.out.println("Cannot add account: status=" + a.getStatusName() + " (only ACTIVE allowed).");
+            return;
+        }
+
+        // avoid duplicates
+        boolean already = ag.getChildren().stream().anyMatch(ch -> aid.equals(ch.getId()));
+        if (already) {
+            System.out.println("Account already in group: " + aid);
+            return;
+        }
+
+        // add to group object
+        ag.add(a);
+
+        // attach global notifiers so group notifications propagate for this child too
+        a.addObserver(emailNotifier);
+        a.addObserver(smsNotifier);
+
+        System.out.println("Added account " + aid + " to group " + gid);
+    }
+
+    // 12) Remove account from group
+    private void cmdRemoveAccountFromGroup(String userId) {
+        System.out.print("Group id: ");
+        String gid = scanner.nextLine().trim();
+        accounts.AccountGroup ag = groups.get(gid);
+        if (ag == null) { System.out.println("Unknown group: " + gid); return; }
+
+        System.out.print("Account id to remove: ");
+        String aid = scanner.nextLine().trim();
+
+        // find the account object among children
+        Account child = ag.getChildren().stream()
+                .filter(c -> aid.equals(c.getId()))
+                .findFirst()
+                .orElse(null);
+
+        if (child == null) {
+            System.out.println("Account not found in group.");
+            return;
+        }
+
+        // remove from group
+        ag.remove(child);
+
+        // detach notifiers we attached on add (optional)
+        try {
+            child.removeObserver(emailNotifier);
+            child.removeObserver(smsNotifier);
+        } catch (Exception ignored) {}
+
+        System.out.println("Removed account " + aid + " from group " + gid);
+    }
+    // 13) Deposit to group — use strategy but call facade for each child (keeps auth/audit)
+    private void cmdDepositToGroup(String userId) {
+        try {
+            System.out.print("Group id: ");
+            String gid = scanner.nextLine().trim();
+            accounts.AccountGroup ag = groups.get(gid);
+            if (ag == null) { System.out.println("Group not found: " + gid); return; }
+            System.out.print("Total amount to deposit: ");
+            double total = Double.parseDouble(scanner.nextLine().trim());
+            if (total <= 0) { System.out.println("Amount must be > 0"); return; }
+
+            List<Account> children = ag.getChildren();
+            if (children.isEmpty()) { System.out.println("Group has no children."); return; }
+
+            // build plan using group's deposit strategy
+            Map<Account, Double> plan = ag.getDepositStrategy().splitDeposit(children, total);
+
+            int success = 0, skippedAuth = 0, skippedStatus = 0, failedFacade = 0;
+            for (Map.Entry<Account, Double> e : plan.entrySet()) {
+                Account a = e.getKey();
+                double amt = e.getValue();
+                if (amt <= 0) continue;
+
+                // STATUS check on destination
+                String status = a.getStatusName();
+                if ("CLOSED".equalsIgnoreCase(status) || "SUSPENDED".equalsIgnoreCase(status)) {
+                    System.out.printf("Skipping %s: destination account status=%s => cannot deposit%n", a.getId(), status);
+                    skippedStatus++;
+                    continue;
+                }
+
+
+
+                Transaction tx = new Transaction(Transaction.Type.DEPOSIT, null, a, amt);
+                boolean ok = facade.deposit(userId, tx);
+                if (!ok) {
+                    System.out.println("Deposit failed for " + a.getId() + " (facade rejected).");
+                    failedFacade++;
+                    continue;
+                }
+                success++;
+                System.out.printf("Deposited %.2f to %s%n", amt, a.getId());
+            }
+
+            System.out.printf("Result: deposited to %d/%d members in group %s. Skipped-auth=%d, skipped-status=%d, failed-facade=%d%n",
+                    success, children.size(), gid, skippedAuth, skippedStatus, failedFacade);
+
+        } catch (NumberFormatException ex) {
+            System.out.println("Invalid number format.");
+        } catch (Exception ex) {
+            System.out.println("Deposit-to-group error: " + ex.getMessage());
+        }
+    }
+
+    // 14) Withdraw from group — use strategy then call facade.transfer for each planned withdrawal
+    private void cmdWithdrawFromGroup(String userId) {
+        try {
+            System.out.print("Group id: ");
+            String gid = scanner.nextLine().trim();
+            accounts.AccountGroup ag = groups.get(gid);
+            if (ag == null) { System.out.println("Unknown or empty group: " + gid); return; }
+            System.out.print("Total amount to withdraw: ");
+            double total = Double.parseDouble(scanner.nextLine().trim());
+            if (total <= 0) { System.out.println("Amount must be > 0"); return; }
+
+            List<Account> children = ag.getChildren();
+            if (children.isEmpty()) { System.out.println("Group has no children."); return; }
+
+            // compute withdraw plan using group's withdraw strategy
+            Map<Account, Double> plan;
+            try {
+                plan = ag.getWithdrawStrategy().splitWithdraw(children, total);
+            } catch (IllegalStateException ise) {
+                System.out.println("Withdraw plan couldn't be created: " + ise.getMessage());
+                return;
+            }
+
+            int success = 0, skippedStatus = 0, failedFacade = 0;
+            for (Map.Entry<Account, Double> e : plan.entrySet()) {
+                Account a = e.getKey();
+                double amt = e.getValue();
+                if (amt <= 0) continue;
+
+                // only ACTIVE accounts allowed to be debited (policy)
+                if (!"ACTIVE".equalsIgnoreCase(a.getStatusName())) {
+                    System.out.printf("Skipping %s: cannot withdraw, status=%s%n", a.getId(), a.getStatusName());
+                    skippedStatus++;
+                    continue;
+                }
+
+                Transaction tx = new Transaction(Transaction.Type.WITHDRAW, a, null, amt);
+                boolean ok = facade.transfer(userId, tx); // uses facade (auth + validation + process)
+                if (!ok) {
+                    System.out.println("Withdraw failed for " + a.getId() + " (facade rejected).");
+                    failedFacade++;
+                    continue;
+                }
+                success++;
+                System.out.printf("Withdrew %.2f from %s%n", amt, a.getId());
+            }
+
+            System.out.printf("Result: withdrew from %d/%d members in group %s. Skipped-status=%d, failed-facade=%d%n",
+                    success, children.size(), gid, skippedStatus, failedFacade);
+
+        } catch (NumberFormatException ex) {
+            System.out.println("Invalid number format.");
+        } catch (Exception ex) {
+            System.out.println("Withdraw-from-group error: " + ex.getMessage());
+        }
+    }
+
+    // 15) Apply interest to group — iterate children (use facade for deposits so audit/auth preserved)
+    private void cmdApplyInterestToGroup(String userId) {
+        try {
+            System.out.print("Group id: ");
+            String gid = scanner.nextLine().trim();
+            accounts.AccountGroup ag = groups.get(gid);
+            if (ag == null) { System.out.println("Unknown or empty group: " + gid); return; }
+
+            System.out.print("Interest percent to apply (e.g. 1.5 for 1.5%): ");
+            double pct = Double.parseDouble(scanner.nextLine().trim());
+            if (pct <= 0) { System.out.println("Percent must be > 0"); return; }
+
+            int applied = 0;
+            for (Account a : ag.getChildren()) {
+                if (a == null) continue;
+                if (!"ACTIVE".equalsIgnoreCase(a.getStatusName())) continue;
+                double add = Math.round(a.getBalance() * (pct/100.0) * 100.0) / 100.0;
+                if (add <= 0) continue;
+                Transaction tx = new Transaction(Transaction.Type.DEPOSIT, null, a, add);
+                boolean ok = facade.deposit(userId, tx);
+                if (ok) {
+                    applied++;
+                    System.out.printf("Applied %.2f to %s%n", add, a.getId());
+                }
+            }
+            System.out.println("Applied interest to " + applied + " children where applicable.");
+        } catch (NumberFormatException ex) {
+            System.out.println("Invalid number format.");
+        } catch (Exception ex) {
+            System.out.println("Apply interest error: " + ex.getMessage());
+        }
+    }
+
 
     /* -------------------------
-       NEW: External transfer via adapter (PayPal / SWIFT)
-       ------------------------- */// داخل InteractiveConsole
+           Admin dashboard (only ADMIN role)
+           - freeze / suspend / close / reopen accounts
+           - view account list & some admin actions
+           ------------------------- */
+    private void cmdAdminDashboard(String userId) {
+        if (!auth.authorize(userId, Role.ADMIN)) {
+            System.out.println("Unauthorized: ADMIN role required.");
+            return;
+        }
+        boolean back = false;
+        while (!back) {
+            System.out.println("=== ADMIN DASHBOARD ===");
+            System.out.println("1) List accounts");
+            System.out.println("2) Change account status (freeze/suspend/close/reopen)");
+            System.out.println("3) View audit (prints audit summary)");
+            System.out.println("0) Back");
+            System.out.print("> ");
+            String choice = scanner.nextLine().trim();
+            switch (choice) {
+                case "1":
+                    cmdListAccounts();
+                    break;
+                case "2":
+                    cmdChangeAccountStatus();
+                    break;
+                case "3":
+                    cmdPrintAuditSummary();
+                    break;
+
+                case "0":
+                    back = true;
+                    break;
+                default:
+                    System.out.println("Invalid choice");
+                    break;
+            }
+        }
+    }
+
+    private void cmdChangeAccountStatus() {
+        try {
+            Account a = pickAccount("Account id");
+            System.out.printf("Current status: %s%n", a.getStatusName());
+            System.out.println("Choose new status: 1) Freeze 2) Suspend 3) Close 4) Reopen");
+            System.out.print("> ");
+            String s = scanner.nextLine().trim();
+            switch (s) {
+                case "1":
+                    a.freeze();
+                    break;
+                case "2":
+                    a.suspend();
+                    break;
+                case "3":
+                    a.close();
+                    break;
+                case "4":
+                    a.reopen();
+                    break;
+                default:
+                    System.out.println("Unknown option");
+                    return;
+            }
+            // notify and audit-like print
+            try {
+                a.notifyObservers("status_change", "Status changed to " + a.getStatusName());
+            } catch (Exception ignored) {
+            }
+            System.out.println("Status changed -> " + a.getStatusName());
+        } catch (Exception e) {
+            System.out.println("Change status error: " + e.getMessage());
+        }
+    }
+
+    private void cmdPrintAuditSummary() {
+        try {
+            System.out.println("=== DASHBOARD SUMMARY ===");
+            System.out.println("Transactions total: " + txService.getHistory().size());
+            AuditLog audit = txService.getAuditLog();
+            if (audit == null) { System.out.println("Audit log not available."); return; }
+            System.out.println("Audit entries: " + audit.entriesCount());
+            System.out.println("=== Daily Audit Log ===");
+            audit.printRecent(10);
+        } catch (Exception e) {
+            System.out.println("Audit error: " + e.getMessage());
+        }
+    }
+
+
+
+    /* -------------------------
+       External transfer (demo)
+       ------------------------- */
     private void cmdExternalTransfer(String userId) {
         try {
             System.out.println("External Transfer - choose source (internal account) and external destination (IBAN/email/etc.)");
             Account from = pickAccount("From (internal id)");
-            System.out.print("To (external identifier, e.g. IBAN/email): ");
-            String toInput = scanner.nextLine().trim();
-            if (toInput.isEmpty()) {
-                System.out.println("Destination required.");
+            // validate source status: no outgoing if FROZEN, SUSPENDED or CLOSED
+            String s = from.getStatusName();
+            if ("FROZEN".equalsIgnoreCase(s) || "SUSPENDED".equalsIgnoreCase(s) || "CLOSED".equalsIgnoreCase(s)) {
+                System.out.println("Cannot send external transfer: source account status=" + s);
                 return;
             }
 
+            System.out.print("To (external identifier, e.g. IBAN/email): ");
+            String toInput = scanner.nextLine().trim();
             System.out.print("Amount: ");
-            double amount = Double.parseDouble(scanner.nextLine().trim());
-            if (amount <= 0) {
-                System.out.println("Amount must be positive.");
+            double amt = Double.parseDouble(scanner.nextLine().trim());
+            if (amt <= 0) { System.out.println("Amount must be > 0"); return; }
+
+            // check balance
+            if (from.getBalance() < amt) {
+                System.out.println("Insufficient funds for external transfer. Available: " + from.getBalance());
                 return;
             }
 
             System.out.println("Method: 1) PayPal  2) SWIFT");
-            String method = scanner.nextLine().trim();
-            // For external transfers we will create a lightweight external Account wrapper so adapters
-            // can receive an Account object if your adapters expect Account.getId() etc.
-            Account external = new payment.ExternalAccount(toInput, toInput); // make sure ExternalAccount ctor is public
+            System.out.print("Choose method (1/2): ");
+            String m = scanner.nextLine().trim();
 
-            // Create transaction (from internal -> external)
-            Transaction tx = new Transaction(Transaction.Type.TRANSFER, from, external, amount);
+            // withdraw from internal account first through facade (so audit/approval runs)
+            try {
+                Transaction withdrawTx = new Transaction(Transaction.Type.WITHDRAW, from, null, amt);
+                boolean wOk = facade.transfer(userId, withdrawTx); // go through facade (auth+txService)
+                if (!wOk) {
+                    System.out.println("Internal withdrawal failed. Aborting external transfer.");
+                    return;
+                }
+            } catch (Exception ex) {
+                System.out.println("Failed to withdraw from source: " + ex.getMessage());
+                return;
+            }
 
-            // IMPORTANT: do NOT bypass facade / txService. Use facade.transfer so we get:
-            //  - authorization check
-            //  - pre-withdraw (reserve) and rollback logic (implemented in BankingFacade)
-            //  - external gateway invocation (PaymentService) and audit
-            // (The BankingFacade already uses paymentService for large/external amounts)
-            boolean ok = facade.transfer(userId, tx);
-            System.out.println(ok ? "External transfer completed successfully." : "External transfer FAILED.");
-        } catch (NumberFormatException nfe) {
-            System.out.println("Invalid number: " + nfe.getMessage());
+            // build a transaction object representing external transfer (from -> external wrapper)
+            payment.ExternalAccount toWrapper = new payment.ExternalAccount(toInput, toInput);
+            Transaction externalTx = new Transaction(Transaction.Type.TRANSFER, from, toWrapper, amt);
+
+            // choose gateway
+            payment.PaymentGateway gateway = ("2".equals(m)) ? new payment.SWIFTAdapter(new payment.SWIFTApi()) : new payment.PayPalAdapter(new payment.PayPalApi());
+            payment.PaymentService svc = new payment.PaymentService(gateway);
+            boolean ok = svc.processExternalTransfer(externalTx);
+
+            if (ok) {
+                // success: record in audit history (we already withdrew; optionally record external executed)
+                txService.getAuditLog().record(externalTx, "EXTERNAL_EXECUTED");
+                System.out.println("External transfer completed successfully.");
+            } else {
+                // failure -> refund the amount to source
+                try {
+                    Transaction refund = new Transaction(Transaction.Type.DEPOSIT, null, from, amt);
+                    txService.process(refund); // deposit back
+                } catch (Exception refundEx) {
+                    // serious: refund failed — log and notify (but continue)
+                    System.out.println("External transfer failed and refund also failed: " + refundEx.getMessage());
+                }
+                System.out.println("External transfer failed.");
+            }
         } catch (Exception e) {
             System.out.println("External transfer error: " + e.getMessage());
         }

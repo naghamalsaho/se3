@@ -7,14 +7,12 @@ import java.util.*;
 
 /**
  * Composite account (family / group).
- * Now supports deposit/withdraw by delegating to children using strategies.
  */
 public class AccountGroup implements Account {
     private final String id;
     private final String name;
     private final List<Account> children = new ArrayList<>();
 
-    // default strategies (can be changed by caller)
     private DepositStrategy depositStrategy = new EvenSplitDeposit();
     private WithdrawStrategy withdrawStrategy = new SequentialWithdraw();
 
@@ -34,7 +32,6 @@ public class AccountGroup implements Account {
 
     @Override
     public void deposit(double amount){
-        // compute distribution then call deposit on children
         Map<Account, Double> plan = depositStrategy.splitDeposit(children, amount);
         for (Map.Entry<Account, Double> e : plan.entrySet()) {
             e.getKey().deposit(e.getValue());
@@ -51,17 +48,10 @@ public class AccountGroup implements Account {
         notifyObservers("withdraw", String.format("Group withdraw %.2f across %d children", amount, plan.size()));
     }
 
-    @Override
-    public void depositInternal(double amount) {
+    // group does not use internal deposit/withdraw directly (no-op)
+    @Override public void depositInternal(double amount) { /* no-op */ }
+    @Override public void withdrawInternal(double amount) { /* no-op */ }
 
-    }
-
-    @Override
-    public void withdrawInternal(double amount) {
-
-    }
-
-    // observer management: attach observer to all children
     @Override
     public void addObserver(NotificationObserver observer) {
         for (Account a : children) a.addObserver(observer);
@@ -77,42 +67,56 @@ public class AccountGroup implements Account {
         for (Account a : children) a.notifyObservers(event, message);
     }
 
+    // Aggregate status: CLOSED > SUSPENDED > FROZEN > ACTIVE
     @Override
     public AccountStatus getStatus() {
-        return null;
+        return null; // keep null or implement a GroupStatus class if you want
     }
 
     @Override
     public void setStatus(AccountStatus status) {
-
+        // propagate to children: optional — keep empty or implement as needed
     }
 
     @Override
     public String getStatusName() {
-        return "";
+        boolean anyClosed = false, anySuspended = false, anyFrozen = false;
+        if (children.isEmpty()) return "ACTIVE";
+        for (Account a : children) {
+            String s = a.getStatusName();
+            if ("CLOSED".equalsIgnoreCase(s)) { anyClosed = true; break; }
+            if ("SUSPENDED".equalsIgnoreCase(s)) anySuspended = true;
+            if ("FROZEN".equalsIgnoreCase(s)) anyFrozen = true;
+        }
+        if (anyClosed) return "CLOSED";
+        if (anySuspended) return "SUSPENDED";
+        if (anyFrozen) return "FROZEN";
+        return "ACTIVE";
     }
 
     @Override
     public void freeze() {
-
+        for (Account a : children) a.freeze();
     }
 
     @Override
     public void suspend() {
-
+        for (Account a : children) a.suspend();
     }
 
     @Override
     public void close() {
-
+        for (Account a : children) a.close();
     }
 
     @Override
     public void reopen() {
-
+        for (Account a : children) a.reopen();
     }
 
-    // strategy setters
+    public DepositStrategy getDepositStrategy(){ return depositStrategy; }
+    public WithdrawStrategy getWithdrawStrategy(){ return withdrawStrategy; }
+
     public void setDepositStrategy(DepositStrategy s){ this.depositStrategy = s; }
     public void setWithdrawStrategy(WithdrawStrategy s){ this.withdrawStrategy = s; }
 }

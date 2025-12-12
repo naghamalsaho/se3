@@ -6,12 +6,14 @@ public class SuspendedState implements AccountStatus {
 
     @Override
     public void deposit(Account account, double amount) {
-        throw new IllegalStateException("Account is suspended. Deposits not allowed.");
+        // Allow deposits/ incoming transfers so owner can top-up
+        account.depositInternal(amount);
     }
 
     @Override
     public void withdraw(Account account, double amount) {
-        throw new IllegalStateException("Account is suspended. Withdrawals not allowed.");
+        // Block withdrawals/outgoing transfers while suspended
+        throw new IllegalStateException("Account is suspended. Withdrawals and outgoing transfers are not allowed.");
     }
 
     @Override
