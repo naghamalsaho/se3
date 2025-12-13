@@ -7,10 +7,7 @@ import accounts.factory.AccountFactory;
 import customers.TicketService;
 import notifications.EmailNotifier;
 import notifications.SMSNotifier;
-import payment.PayPalApi;
-import payment.PayPalAdapter;
-import payment.PaymentGateway;
-import payment.PaymentService;
+import payment.*;
 import recommendations.RecommendationService;
 import security.AuthService;
 import security.Role;
@@ -43,17 +40,20 @@ public class InteractiveConsole {
     // new: groups storage (id -> set of account ids)
     private final Map<String, accounts.AccountGroup> groups = new ConcurrentHashMap<>();
     private final Random idGen = new Random();
+    private final PaymentService paymentService;
 
     public InteractiveConsole(Map<String, Account> accounts,
                               TransactionService txService,
                               BankingFacade facade,
                               AuthService auth,
-                              TicketService ticketService) {
+                              TicketService ticketService,
+                              PaymentService paymentService) {
         this.accounts = accounts;
         this.txService = txService;
         this.facade = facade;
         this.auth = auth;
         this.ticketService = ticketService;
+        this.paymentService = paymentService;
     }
 
     public void start() {
@@ -747,9 +747,10 @@ public class InteractiveConsole {
                 return;
             }
 
-            System.out.println("Method: 1) PayPal  2) SWIFT");
-            System.out.print("Choose method (1/2): ");
+            System.out.println("Method: 0) Use default gateway  1) PayPal  2) SWIFT");
+            System.out.print("Choose method (0/1/2, default 0): ");
             String m = scanner.nextLine().trim();
+            if (m.isEmpty()) m = "0";
 
             // withdraw from internal account first through facade (so audit/approval runs)
             try {
@@ -768,22 +769,27 @@ public class InteractiveConsole {
             payment.ExternalAccount toWrapper = new payment.ExternalAccount(toInput, toInput);
             Transaction externalTx = new Transaction(Transaction.Type.TRANSFER, from, toWrapper, amt);
 
-            // choose gateway
-            payment.PaymentGateway gateway = ("2".equals(m)) ? new payment.SWIFTAdapter(new payment.SWIFTApi()) : new payment.PayPalAdapter(new payment.PayPalApi());
-            payment.PaymentService svc = new payment.PaymentService(gateway);
+            // decide which PaymentService to use:
+            PaymentService svc;
+           if ("1".equals(m)) {
+                svc = new PaymentService(new PayPalAdapter(new PayPalApi()));
+            } else if ("2".equals(m)) {
+                svc = new PaymentService(new SWIFTAdapter(new SWIFTApi()));
+            } else {
+                svc = this.paymentService;
+            }
+
             boolean ok = svc.processExternalTransfer(externalTx);
 
             if (ok) {
-                // success: record in audit history (we already withdrew; optionally record external executed)
                 txService.getAuditLog().record(externalTx, "EXTERNAL_EXECUTED");
                 System.out.println("External transfer completed successfully.");
             } else {
-                // failure -> refund the amount to source
+                // refund on failure
                 try {
                     Transaction refund = new Transaction(Transaction.Type.DEPOSIT, null, from, amt);
-                    txService.process(refund); // deposit back
+                    txService.process(refund);
                 } catch (Exception refundEx) {
-                    // serious: refund failed — log and notify (but continue)
                     System.out.println("External transfer failed and refund also failed: " + refundEx.getMessage());
                 }
                 System.out.println("External transfer failed.");
@@ -791,6 +797,5 @@ public class InteractiveConsole {
         } catch (Exception e) {
             System.out.println("External transfer error: " + e.getMessage());
         }
-    }
+    }}
 
-}

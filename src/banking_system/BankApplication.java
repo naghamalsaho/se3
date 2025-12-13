@@ -25,21 +25,12 @@ import java.util.concurrent.ScheduledFuture;
 
 /**
  * Updated BankApplication that sets up the system and launches the interactive CLI.
- * - builds observers, accounts, decorators
- * - builds approval chain and TransactionService
- * - builds payment adapters and PaymentService
- * - builds AuthService and BankingFacade
- * - starts InteractiveConsole for user-driven interaction
  */
 public class BankApplication {
     public static void main(String[] args) throws Exception {
         // ---------- Notifiers ----------
         EmailNotifier emailNotifier = new EmailNotifier("ops@bank.com");
         SMSNotifier smsNotifier = new SMSNotifier("+12345");
-
-        // ---------- Create accounts ----------
-
-
 
         // ---------- Approval chain (Chain of Responsibility) ----------
         TransactionValidationHandler validation = new TransactionValidationHandler();
@@ -63,7 +54,6 @@ public class BankApplication {
         // You can register more users and roles as needed
 
         // ---------- Facade ----------
-        // BankingFacade is expected to be available in the project (same package or accessible)
         BankingFacade facade = new BankingFacade(txService, auth, paymentService);
 
         // ---------- Ticket service & recommendations & admin ----------
@@ -73,10 +63,9 @@ public class BankApplication {
         // ---------- Put accounts into a map for the InteractiveConsole ----------
         Map<String, Account> accountsMap = new LinkedHashMap<>();
 
-
         // ---------- Start Interactive CLI ----------
-        InteractiveConsole console = new InteractiveConsole(accountsMap, txService, facade, auth, ticketService);
-
+        // NOTE: InteractiveConsole constructor must accept PaymentService as the last argument.
+        InteractiveConsole console = new InteractiveConsole(accountsMap, txService, facade, auth, ticketService, paymentService);
         console.start();
 
         // ---------- After CLI returns, optionally show summary and shutdown ----------
