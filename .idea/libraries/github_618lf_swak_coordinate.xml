@@ -1,0 +1,35 @@
+<component name="libraryTable">
+  <library name="github.618lf.swak.coordinate" type="repository">
+    <properties maven-id="com.github.618lf:swak-coordinate:1.1.2_final" />
+    <CLASSES>
+      <root url="jar://$MAVEN_REPOSITORY$/com/github/618lf/swak-coordinate/1.1.2_final/swak-coordinate-1.1.2_final.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/com/github/618lf/swak-core/1.1.2_final/swak-core-1.1.2_final.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/springframework/boot/spring-boot/2.5.4/spring-boot-2.5.4.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/springframework/spring-core/5.3.9/spring-core-5.3.9.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/springframework/spring-jcl/5.3.9/spring-jcl-5.3.9.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/springframework/spring-aop/5.3.9/spring-aop-5.3.9.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/springframework/spring-beans/5.3.9/spring-beans-5.3.9.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/springframework/spring-context/5.3.9/spring-context-5.3.9.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/springframework/spring-expression/5.3.9/spring-expression-5.3.9.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/com/alibaba/fastjson/1.2.78/fastjson-1.2.78.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/slf4j/slf4j-api/1.7.32/slf4j-api-1.7.32.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/ch/qos/logback/logback-classic/1.2.5/logback-classic-1.2.5.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/ch/qos/logback/logback-core/1.2.5/logback-core-1.2.5.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/io/netty/netty-all/4.1.67.Final/netty-all-4.1.67.Final.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/com/esotericsoftware/kryo/kryo5/5.2.0/kryo5-5.2.0.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/javassist/javassist/3.28.0-GA/javassist-3.28.0-GA.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/cglib/cglib/3.3.0/cglib-3.3.0.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/ow2/asm/asm/7.1/asm-7.1.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/io/projectreactor/reactor-core/3.4.9/reactor-core-3.4.9.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/reactivestreams/reactive-streams/1.0.3/reactive-streams-1.0.3.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/apache/curator/curator-framework/5.2.0/curator-framework-5.2.0.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/apache/curator/curator-client/5.2.0/curator-client-5.2.0.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/apache/curator/curator-recipes/5.2.0/curator-recipes-5.2.0.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/apache/zookeeper/zookeeper/3.6.3/zookeeper-3.6.3.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/apache/zookeeper/zookeeper-jute/3.6.3/zookeeper-jute-3.6.3.jar!/" />
+      <root url="jar://$MAVEN_REPOSITORY$/org/apache/yetus/audience-annotations/0.5.0/audience-annotations-0.5.0.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

@@ -21,6 +21,8 @@ import recommendations.RecommendationService;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledFuture;
 
 /**
@@ -32,54 +34,49 @@ public class BankApplication {
         EmailNotifier emailNotifier = new EmailNotifier("ops@bank.com");
         SMSNotifier smsNotifier = new SMSNotifier("+12345");
 
-        // ---------- Approval chain (Chain of Responsibility) ----------
+        // ---------- Approval chain ----------
         TransactionValidationHandler validation = new TransactionValidationHandler();
         AutoApprovalHandler auto = new AutoApprovalHandler(500);
         ManagerApprovalHandler manager = new ManagerApprovalHandler(2000);
         validation.setSuccessor(auto);
         auto.setSuccessor(manager);
 
-        // ---------- TransactionService (with chain) ----------
+        // ---------- TransactionService ----------
         TransactionService txService = new TransactionService(validation);
 
         // ---------- Payment (Adapter) ----------
         PayPalApi ppApi = new PayPalApi();
         PaymentGateway ppGateway = new PayPalAdapter(ppApi);
-        PaymentService paymentService = new PaymentService(ppGateway);
 
-        // ---------- AuthService (RBAC) ----------
+        // create a dedicated executor for gateway calls (tunable)
+        int cpus = Runtime.getRuntime().availableProcessors();
+        // use fixed pool size (example):  max(4, cpus*2) or tune as needed
+        ExecutorService gatewayExecutor = Executors.newFixedThreadPool(Math.max(4, cpus * 2));
+
+        PaymentService paymentService = new PaymentService(ppGateway, gatewayExecutor);
+
+        // ---------- AuthService ----------
         AuthService auth = new AuthService();
         auth.register("user1", Role.CUSTOMER);
         auth.register("mgr1", Role.MANAGER);
-        // You can register more users and roles as needed
 
         // ---------- Facade ----------
         BankingFacade facade = new BankingFacade(txService, auth, paymentService);
 
-        // ---------- Ticket service & recommendations & admin ----------
+        // ---------- Ticket service ----------
         TicketService ticketService = new TicketService();
-        RecommendationService recommendationService = new RecommendationService();
 
         // ---------- Put accounts into a map for the InteractiveConsole ----------
         Map<String, Account> accountsMap = new LinkedHashMap<>();
 
         // ---------- Start Interactive CLI ----------
-        // NOTE: InteractiveConsole constructor must accept PaymentService as the last argument.
         InteractiveConsole console = new InteractiveConsole(accountsMap, txService, facade, auth, ticketService, paymentService);
         console.start();
 
-        // ---------- After CLI returns, optionally show summary and shutdown ----------
+        // ---------- Shutdown ----------
         System.out.println("Shutting down services...");
-
-        // Print dashboard & reports (optional)
-        DashboardService dashboard = new DashboardService(txService.getHistory(), txService.getAuditLog());
-        dashboard.printSummary();
-        ReportingService reporting = new ReportingService(txService.getAuditLog());
-        reporting.dailyReport();
-
-        // If any recurring jobs were scheduled, shut down the txService scheduler
         txService.shutdown();
-
+        paymentService.shutdownExecutor();
         System.out.println("Application stopped.");
     }
 }

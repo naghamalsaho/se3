@@ -14,7 +14,15 @@ public class FrozenState implements AccountStatus {
         // Block withdrawals
         throw new IllegalStateException("Account is frozen. Withdrawals not allowed.");
     }
+    @Override
+    public boolean canBeSource() {
+        return false;
+    }
 
+    @Override
+    public boolean canReceive() {
+        return false;
+    }
     @Override
     public String name() { return "FROZEN"; }
 }

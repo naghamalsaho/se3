@@ -17,6 +17,7 @@ import transactions.Transaction;
 import transactions.TransactionService;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -41,7 +42,7 @@ public class InteractiveConsole {
     private final Map<String, accounts.AccountGroup> groups = new ConcurrentHashMap<>();
     private final Random idGen = new Random();
     private final PaymentService paymentService;
-
+    private final GroupService groupService;
     public InteractiveConsole(Map<String, Account> accounts,
                               TransactionService txService,
                               BankingFacade facade,
@@ -54,6 +55,7 @@ public class InteractiveConsole {
         this.auth = auth;
         this.ticketService = ticketService;
         this.paymentService = paymentService;
+        this.groupService = new GroupService(accounts);
     }
 
     public void start() {
@@ -404,15 +406,7 @@ public class InteractiveConsole {
         System.out.print("Create group - enter group name/label: ");
         String label = scanner.nextLine().trim();
         if (label.isEmpty()) { System.out.println("Group name required."); return; }
-        String gid;
-        do {
-            gid = "g" + (10000 + idGen.nextInt(90000));
-        } while (groups.containsKey(gid) || accounts.containsKey(gid));
-        accounts.AccountGroup ag = new accounts.AccountGroup(gid, label);
-        groups.put(gid, ag);
-        accounts.put(gid, ag); // so it appears in account listing
-        ag.addObserver(emailNotifier);
-        ag.addObserver(smsNotifier);
+        String gid = groupService.createGroup(label);
         System.out.println("Group created: " + gid + " (" + label + ")");
     }
 
@@ -422,43 +416,27 @@ public class InteractiveConsole {
     private void cmdAddAccountToGroup(String userId) {
         System.out.print("Group id: ");
         String gid = scanner.nextLine().trim();
-        accounts.AccountGroup ag = groups.get(gid);
-        if (ag == null) { System.out.println("Unknown group: " + gid); return; }
-
         System.out.print("Account id to add: ");
         String aid = scanner.nextLine().trim();
+
         Account a = accounts.get(aid);
         if (a == null) { System.out.println("No account with id: " + aid); return; }
-
-        // require account ACTIVE (حسب منطقك القديم)
         if (!"ACTIVE".equalsIgnoreCase(a.getStatusName())) {
             System.out.println("Cannot add account: status=" + a.getStatusName() + " (only ACTIVE allowed).");
             return;
         }
-
-        // avoid duplicates
-        boolean already = ag.getChildren().stream().anyMatch(ch -> aid.equals(ch.getId()));
-        if (already) {
-            System.out.println("Account already in group: " + aid);
-            return;
-        }
-
-        // add to group object
-        ag.add(a);
-
-        // attach global notifiers so group notifications propagate for this child too
-        a.addObserver(emailNotifier);
-        a.addObserver(smsNotifier);
-
-        System.out.println("Added account " + aid + " to group " + gid);
+        boolean ok = groupService.addToGroup(gid, aid);
+        System.out.println(ok ? "Added account " + aid + " to group " + gid : "Failed to add (group or account unknown).");
     }
+
 
     // 12) Remove account from group
     private void cmdRemoveAccountFromGroup(String userId) {
         System.out.print("Group id: ");
         String gid = scanner.nextLine().trim();
-        accounts.AccountGroup ag = groups.get(gid);
-        if (ag == null) { System.out.println("Unknown group: " + gid); return; }
+        var og = groupService.getGroup(gid);
+        if (og.isEmpty()) { System.out.println("Unknown group: " + gid); return; }
+        accounts.AccountGroup ag = og.get();
 
         System.out.print("Account id to remove: ");
         String aid = scanner.nextLine().trim();
@@ -477,7 +455,7 @@ public class InteractiveConsole {
         // remove from group
         ag.remove(child);
 
-        // detach notifiers we attached on add (optional)
+        // detach notifiers we attached on add (optional / defensive)
         try {
             child.removeObserver(emailNotifier);
             child.removeObserver(smsNotifier);
@@ -485,13 +463,16 @@ public class InteractiveConsole {
 
         System.out.println("Removed account " + aid + " from group " + gid);
     }
+
     // 13) Deposit to group — use strategy but call facade for each child (keeps auth/audit)
     private void cmdDepositToGroup(String userId) {
         try {
             System.out.print("Group id: ");
             String gid = scanner.nextLine().trim();
-            accounts.AccountGroup ag = groups.get(gid);
-            if (ag == null) { System.out.println("Group not found: " + gid); return; }
+            var og = groupService.getGroup(gid);
+            if (og.isEmpty()) { System.out.println("Group not found: " + gid); return; }
+            accounts.AccountGroup ag = og.get();
+
             System.out.print("Total amount to deposit: ");
             double total = Double.parseDouble(scanner.nextLine().trim());
             if (total <= 0) { System.out.println("Amount must be > 0"); return; }
@@ -499,16 +480,16 @@ public class InteractiveConsole {
             List<Account> children = ag.getChildren();
             if (children.isEmpty()) { System.out.println("Group has no children."); return; }
 
-            // build plan using group's deposit strategy
+            // الحساب يتم عبر الاستراتيجية داخل الـgroup — نحصل على الخطة
             Map<Account, Double> plan = ag.getDepositStrategy().splitDeposit(children, total);
 
-            int success = 0, skippedAuth = 0, skippedStatus = 0, failedFacade = 0;
+            int success = 0, skippedStatus = 0, failedFacade = 0;
             for (Map.Entry<Account, Double> e : plan.entrySet()) {
                 Account a = e.getKey();
                 double amt = e.getValue();
                 if (amt <= 0) continue;
 
-                // STATUS check on destination
+                // STATUS check
                 String status = a.getStatusName();
                 if ("CLOSED".equalsIgnoreCase(status) || "SUSPENDED".equalsIgnoreCase(status)) {
                     System.out.printf("Skipping %s: destination account status=%s => cannot deposit%n", a.getId(), status);
@@ -516,10 +497,8 @@ public class InteractiveConsole {
                     continue;
                 }
 
-
-
                 Transaction tx = new Transaction(Transaction.Type.DEPOSIT, null, a, amt);
-                boolean ok = facade.deposit(userId, tx);
+                boolean ok = facade.deposit(userId, tx); // facade سيؤدي الفحص والـaudit
                 if (!ok) {
                     System.out.println("Deposit failed for " + a.getId() + " (facade rejected).");
                     failedFacade++;
@@ -529,8 +508,8 @@ public class InteractiveConsole {
                 System.out.printf("Deposited %.2f to %s%n", amt, a.getId());
             }
 
-            System.out.printf("Result: deposited to %d/%d members in group %s. Skipped-auth=%d, skipped-status=%d, failed-facade=%d%n",
-                    success, children.size(), gid, skippedAuth, skippedStatus, failedFacade);
+            System.out.printf("Result: deposited to %d/%d members in group %s. Skipped-status=%d, failed-facade=%d%n",
+                    success, children.size(), gid, skippedStatus, failedFacade);
 
         } catch (NumberFormatException ex) {
             System.out.println("Invalid number format.");
@@ -539,13 +518,16 @@ public class InteractiveConsole {
         }
     }
 
+
     // 14) Withdraw from group — use strategy then call facade.transfer for each planned withdrawal
     private void cmdWithdrawFromGroup(String userId) {
         try {
             System.out.print("Group id: ");
             String gid = scanner.nextLine().trim();
-            accounts.AccountGroup ag = groups.get(gid);
-            if (ag == null) { System.out.println("Unknown or empty group: " + gid); return; }
+            var og = groupService.getGroup(gid);
+            if (og.isEmpty()) { System.out.println("Unknown or empty group: " + gid); return; }
+            accounts.AccountGroup ag = og.get();
+
             System.out.print("Total amount to withdraw: ");
             double total = Double.parseDouble(scanner.nextLine().trim());
             if (total <= 0) { System.out.println("Amount must be > 0"); return; }
@@ -576,7 +558,7 @@ public class InteractiveConsole {
                 }
 
                 Transaction tx = new Transaction(Transaction.Type.WITHDRAW, a, null, amt);
-                boolean ok = facade.transfer(userId, tx); // uses facade (auth + validation + process)
+                boolean ok = facade.transfer(userId, tx); // facade = auth + validation + process
                 if (!ok) {
                     System.out.println("Withdraw failed for " + a.getId() + " (facade rejected).");
                     failedFacade++;
@@ -596,13 +578,15 @@ public class InteractiveConsole {
         }
     }
 
+
     // 15) Apply interest to group — iterate children (use facade for deposits so audit/auth preserved)
     private void cmdApplyInterestToGroup(String userId) {
         try {
             System.out.print("Group id: ");
             String gid = scanner.nextLine().trim();
-            accounts.AccountGroup ag = groups.get(gid);
-            if (ag == null) { System.out.println("Unknown or empty group: " + gid); return; }
+            var og = groupService.getGroup(gid);
+            if (og.isEmpty()) { System.out.println("Unknown or empty group: " + gid); return; }
+            accounts.AccountGroup ag = og.get();
 
             System.out.print("Interest percent to apply (e.g. 1.5 for 1.5%): ");
             double pct = Double.parseDouble(scanner.nextLine().trim());
@@ -612,7 +596,7 @@ public class InteractiveConsole {
             for (Account a : ag.getChildren()) {
                 if (a == null) continue;
                 if (!"ACTIVE".equalsIgnoreCase(a.getStatusName())) continue;
-                double add = Math.round(a.getBalance() * (pct/100.0) * 100.0) / 100.0;
+                double add = Math.round(a.getBalance() * (pct / 100.0) * 100.0) / 100.0;
                 if (add <= 0) continue;
                 Transaction tx = new Transaction(Transaction.Type.DEPOSIT, null, a, add);
                 boolean ok = facade.deposit(userId, tx);
@@ -747,53 +731,69 @@ public class InteractiveConsole {
                 return;
             }
 
-            System.out.println("Method: 0) Use default gateway  1) PayPal  2) SWIFT");
-            System.out.print("Choose method (0/1/2, default 0): ");
+            System.out.println("Method: 1) PayPal  2) SWIFT");
+            System.out.print("Choose method (1/2): ");
             String m = scanner.nextLine().trim();
-            if (m.isEmpty()) m = "0";
 
-            // withdraw from internal account first through facade (so audit/approval runs)
-            try {
-                Transaction withdrawTx = new Transaction(Transaction.Type.WITHDRAW, from, null, amt);
-                boolean wOk = facade.transfer(userId, withdrawTx); // go through facade (auth+txService)
-                if (!wOk) {
-                    System.out.println("Internal withdrawal failed. Aborting external transfer.");
-                    return;
-                }
-            } catch (Exception ex) {
-                System.out.println("Failed to withdraw from source: " + ex.getMessage());
+            // 1) withdraw internally first (go through facade => auth + txService)
+            Transaction withdrawTx = new Transaction(Transaction.Type.WITHDRAW, from, null, amt);
+            boolean wOk = facade.transfer(userId, withdrawTx);
+            if (!wOk) {
+                System.out.println("Internal withdrawal failed. Aborting external transfer.");
                 return;
             }
 
-            // build a transaction object representing external transfer (from -> external wrapper)
-            payment.ExternalAccount toWrapper = new payment.ExternalAccount(toInput, toInput);
+            // 2) Build external transaction (from -> external wrapper) for audit and gateway
+            ExternalAccount toWrapper = new ExternalAccount(toInput, toInput);
             Transaction externalTx = new Transaction(Transaction.Type.TRANSFER, from, toWrapper, amt);
 
-            // decide which PaymentService to use:
-            PaymentService svc;
-           if ("1".equals(m)) {
-                svc = new PaymentService(new PayPalAdapter(new PayPalApi()));
-            } else if ("2".equals(m)) {
-                svc = new PaymentService(new SWIFTAdapter(new SWIFTApi()));
-            } else {
-                svc = this.paymentService;
-            }
+            // 3) Record scheduled state in audit and notify owner
+            txService.getAuditLog().record(externalTx, "EXTERNAL_SCHEDULED");
+            try { from.notifyObservers("external", "External transfer scheduled to " + toInput + " amount " + amt); } catch (Exception ignored) {}
 
-            boolean ok = svc.processExternalTransfer(externalTx);
+            // 4) choose gateway adapter instance (you may want to centralize this)
+            PaymentGateway gateway = ("2".equals(m)) ? new SWIFTAdapter(new SWIFTApi()) : new PayPalAdapter(new PayPalApi());
+            // If paymentService was configured for a specific gateway at startup, you could route there.
+            // For demo we use existing paymentService which was created with a gateway. If you need per-method gateway,
+            // create a lightweight PaymentService wrapper or expose an API to select gateway. Here we'll call paymentService.async.
 
-            if (ok) {
-                txService.getAuditLog().record(externalTx, "EXTERNAL_EXECUTED");
-                System.out.println("External transfer completed successfully.");
-            } else {
-                // refund on failure
-                try {
-                    Transaction refund = new Transaction(Transaction.Type.DEPOSIT, null, from, amt);
-                    txService.process(refund);
-                } catch (Exception refundEx) {
-                    System.out.println("External transfer failed and refund also failed: " + refundEx.getMessage());
+            // call async transfer (paymentService built with a gateway earlier)
+            CompletableFuture<Boolean> fut = paymentService.processExternalTransferAsync(externalTx);
+
+            // 5) callback: on success mark EXTERNAL_EXECUTED; on failure try refund and mark EXTERNAL_FAILED
+            fut.whenComplete((success, ex) -> {
+                if (ex != null) {
+                    // gateway threw exception
+                    txService.getAuditLog().record(externalTx, "EXTERNAL_FAILED: " + ex.getMessage());
+                    System.out.println("[Async] External transfer error: " + ex.getMessage());
+                    // attempt refund
+                    try {
+                        Transaction refund = new Transaction(Transaction.Type.DEPOSIT, null, from, amt);
+                        txService.process(refund);
+                        txService.getAuditLog().record(externalTx, "REFUNDED_AFTER_FAILURE");
+                    } catch (Exception refundEx) {
+                        txService.getAuditLog().record(externalTx, "REFUND_FAILED: " + refundEx.getMessage());
+                    }
+                    return;
                 }
-                System.out.println("External transfer failed.");
-            }
+
+                if (Boolean.TRUE.equals(success)) {
+                    txService.getAuditLog().record(externalTx, "EXTERNAL_EXECUTED");
+                    try { from.notifyObservers("external", "External transfer to " + toInput + " completed."); } catch (Exception ignored) {}
+                } else {
+                    txService.getAuditLog().record(externalTx, "EXTERNAL_FAILED");
+                    // refund
+                    try {
+                        Transaction refund = new Transaction(Transaction.Type.DEPOSIT, null, from, amt);
+                        txService.process(refund);
+                        txService.getAuditLog().record(externalTx, "REFUNDED_AFTER_FAILURE");
+                    } catch (Exception refundEx) {
+                        txService.getAuditLog().record(externalTx, "REFUND_FAILED: " + refundEx.getMessage());
+                    }
+                }
+            });
+
+            System.out.println("External transfer scheduled (async). You'll be notified when it completes.");
         } catch (Exception e) {
             System.out.println("External transfer error: " + e.getMessage());
         }

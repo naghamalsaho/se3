@@ -1,12 +1,12 @@
 package accounts;
 
-import accounts.state.AccountStatus;
+import accounts.state.*;
 import notifications.NotificationObserver;
 
 import java.util.*;
 
 /**
- * Composite account (family / group).
+ * Composite account (group).
  */
 public class AccountGroup implements Account {
     private final String id;
@@ -20,7 +20,7 @@ public class AccountGroup implements Account {
         this.id = id; this.name = name;
     }
 
-    public void add(Account a){ children.add(a); }
+    public void add(Account a){ children.add(a);  } // observer management remains outside ideally
     public void remove(Account a){ children.remove(a); }
     public List<Account> getChildren(){ return Collections.unmodifiableList(children); }
 
@@ -48,9 +48,16 @@ public class AccountGroup implements Account {
         notifyObservers("withdraw", String.format("Group withdraw %.2f across %d children", amount, plan.size()));
     }
 
-    // group does not use internal deposit/withdraw directly (no-op)
-    @Override public void depositInternal(double amount) { /* no-op */ }
-    @Override public void withdrawInternal(double amount) { /* no-op */ }
+    @Override
+    public void depositInternal(double amount) {
+        // internal deposit delegates to same public behavior
+        deposit(amount);
+    }
+
+    @Override
+    public void withdrawInternal(double amount) {
+        withdraw(amount);
+    }
 
     @Override
     public void addObserver(NotificationObserver observer) {
@@ -67,51 +74,52 @@ public class AccountGroup implements Account {
         for (Account a : children) a.notifyObservers(event, message);
     }
 
-    // Aggregate status: CLOSED > SUSPENDED > FROZEN > ACTIVE
     @Override
     public AccountStatus getStatus() {
-        return null; // keep null or implement a GroupStatus class if you want
+        // aggregate policy: if any CLOSED -> CLOSED, else if any FROZEN -> FROZEN, else if any SUSPENDED -> SUSPENDED, else ACTIVE
+        boolean anyClosed = false, anyFrozen = false, anySuspended = false;
+        for (Account c : children) {
+            String s = c.getStatusName();
+            if ("CLOSED".equalsIgnoreCase(s)) anyClosed = true;
+            else if ("FROZEN".equalsIgnoreCase(s)) anyFrozen = true;
+            else if ("SUSPENDED".equalsIgnoreCase(s)) anySuspended = true;
+        }
+        if (anyClosed) return new ClosedState();
+        if (anyFrozen) return new FrozenState();
+        if (anySuspended) return new SuspendedState();
+        return new ActiveState();
     }
 
     @Override
     public void setStatus(AccountStatus status) {
-        // propagate to children: optional — keep empty or implement as needed
+        for (Account c : children) {
+            c.setStatus(status);
+        }
     }
 
     @Override
     public String getStatusName() {
-        boolean anyClosed = false, anySuspended = false, anyFrozen = false;
-        if (children.isEmpty()) return "ACTIVE";
-        for (Account a : children) {
-            String s = a.getStatusName();
-            if ("CLOSED".equalsIgnoreCase(s)) { anyClosed = true; break; }
-            if ("SUSPENDED".equalsIgnoreCase(s)) anySuspended = true;
-            if ("FROZEN".equalsIgnoreCase(s)) anyFrozen = true;
-        }
-        if (anyClosed) return "CLOSED";
-        if (anySuspended) return "SUSPENDED";
-        if (anyFrozen) return "FROZEN";
-        return "ACTIVE";
+        return getStatus().name();
     }
 
     @Override
     public void freeze() {
-        for (Account a : children) a.freeze();
+        for (Account c : children) c.freeze();
     }
 
     @Override
     public void suspend() {
-        for (Account a : children) a.suspend();
+        for (Account c : children) c.suspend();
     }
 
     @Override
     public void close() {
-        for (Account a : children) a.close();
+        for (Account c : children) c.close();
     }
 
     @Override
     public void reopen() {
-        for (Account a : children) a.reopen();
+        for (Account c : children) c.reopen();
     }
 
     public DepositStrategy getDepositStrategy(){ return depositStrategy; }
