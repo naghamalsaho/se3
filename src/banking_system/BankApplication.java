@@ -17,19 +17,30 @@ import customers.TicketService;
 import admin.DashboardService;
 import admin.ReportingService;
 import recommendations.RecommendationService;
+import util.LocalizationService;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledFuture;
+import customers.CardService;
 
 /**
  * Updated BankApplication that sets up the system and launches the interactive CLI.
  */
 public class BankApplication {
     public static void main(String[] args) throws Exception {
+
+
+
+
+        LocalizationService loc = new LocalizationService("i18n.messages", Locale.ENGLISH);
+        // اختبر مفتاح موجود في ملف الخصائص
+
+        loc.setLocale(new Locale("en"));
         // ---------- Notifiers ----------
         EmailNotifier emailNotifier = new EmailNotifier("ops@bank.com");
         SMSNotifier smsNotifier = new SMSNotifier("+12345");
@@ -64,13 +75,16 @@ public class BankApplication {
         BankingFacade facade = new BankingFacade(txService, auth, paymentService);
 
         // ---------- Ticket service ----------
-        TicketService ticketService = new TicketService();
+        Map<String, Account> accountsMap = new LinkedHashMap<>();   // <-- هنا تخلق الخريطة أولاً
 
+        // ---------- Ticket/Card services (need accountsMap) ----------
+        CardService cardService = new CardService();
+        TicketService ticketService = new TicketService(accountsMap, cardService);
         // ---------- Put accounts into a map for the InteractiveConsole ----------
-        Map<String, Account> accountsMap = new LinkedHashMap<>();
+
 
         // ---------- Start Interactive CLI ----------
-        InteractiveConsole console = new InteractiveConsole(accountsMap, txService, facade, auth, ticketService, paymentService);
+        InteractiveConsole console = new InteractiveConsole(accountsMap, txService, facade, auth, ticketService, paymentService,loc,cardService);
         console.start();
 
         // ---------- Shutdown ----------

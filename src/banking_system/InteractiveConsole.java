@@ -1,10 +1,13 @@
 package banking_system;
-
+import customers.Card;
+import customers.CardService;
 import accounts.*;
 import accounts.decorators.InsuranceDecorator;
 import accounts.decorators.OverdraftProtectionDecorator;
 import accounts.factory.AccountFactory;
+import customers.Ticket;
 import customers.TicketService;
+
 import notifications.EmailNotifier;
 import notifications.SMSNotifier;
 import payment.*;
@@ -15,7 +18,16 @@ import transactions.AuditLog;
 import transactions.RecurringTransaction;
 import transactions.Transaction;
 import transactions.TransactionService;
+import util.LocalizationService;
 
+import java.io.BufferedWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -43,12 +55,17 @@ public class InteractiveConsole {
     private final Random idGen = new Random();
     private final PaymentService paymentService;
     private final GroupService groupService;
+    private final LocalizationService loc;
+    private final CardService cardService;
+
     public InteractiveConsole(Map<String, Account> accounts,
                               TransactionService txService,
                               BankingFacade facade,
                               AuthService auth,
                               TicketService ticketService,
-                              PaymentService paymentService) {
+                              PaymentService paymentService,
+                              LocalizationService loc,
+                              CardService cardService ) {
         this.accounts = accounts;
         this.txService = txService;
         this.facade = facade;
@@ -56,11 +73,13 @@ public class InteractiveConsole {
         this.ticketService = ticketService;
         this.paymentService = paymentService;
         this.groupService = new GroupService(accounts);
+        this.loc = loc;
+        this.cardService=cardService;
     }
 
     public void start() {
         // ensure fixed admin user exists in AuthService? we'll register on demand
-        System.out.println("=== Welcome to the Interactive Bank CLI ===");
+        System.out.println(loc.t("menu.title"));
         // نفتح القائمة فوراً كمستخدم افتراضي ("customer") — هذا المُستخدم يمكن تغييره لاحقاً
         String currentUserId = "customer";
         // Ensure default user registered as CUSTOMER (idempotent)
@@ -123,30 +142,30 @@ public class InteractiveConsole {
 
         System.out.println("Exiting CLI. Bye!");
     }
-
     private void printMainMenu(String userId) {
-        System.out.println("Menu:");
-        System.out.println("1) Create account");
-        System.out.println("2) List accounts");
-        System.out.println("3) Deposit");
-        System.out.println("4) Withdraw");
-        System.out.println("5) Transfer");
-        System.out.println("6) Schedule recurring payment");
-        System.out.println("7) View transaction history");
-        System.out.println("8) Create support ticket");
-        System.out.println("9) Add feature to account (Decorator)");
-        System.out.println("10) Create account group");
-        System.out.println("11) Add account to group");
-        System.out.println("12) Remove account from group");
-        System.out.println("13) Deposit to group");
-        System.out.println("14) Withdraw from group");
-        System.out.println("15) Apply interest to group");
-        System.out.println("16) External transfer (via gateway)");
+        System.out.println(loc.t("menu.title2"));
+        System.out.println(loc.t("menu.create_account"));
+        System.out.println(loc.t("menu.list_accounts"));
+        System.out.println(loc.t("menu.deposit"));
+        System.out.println(loc.t("menu.withdraw"));
+        System.out.println(loc.t("menu.transfer"));
+        System.out.println(loc.t("menu.schedule_recurring"));
+        System.out.println(loc.t("menu.history"));
+        System.out.println(loc.t("menu.create_ticket"));
+        System.out.println(loc.t("menu.add_feature"));
+        System.out.println(loc.t("menu.create_group"));
+        System.out.println(loc.t("menu.add_to_group"));
+        System.out.println(loc.t("menu.remove_from_group"));
+        System.out.println(loc.t("menu.deposit_to_group"));
+        System.out.println(loc.t("menu.withdraw_from_group"));
+        System.out.println(loc.t("menu.apply_interest_group"));
+        System.out.println(loc.t("menu.external_transfer"));
         // hint for admin entry
-        System.out.println("D) Admin dashboard (requires admin secret)");
-        System.out.println("0) Exit");
-        System.out.print("> ");
+        System.out.println(loc.t("menu.admin_dashboard_hint"));
+        System.out.println(loc.t("menu.exit"));
+        System.out.print(loc.t("menu.prompt"));
     }
+
 
     /* -------------------------
        Account creation & basic operations
@@ -355,14 +374,17 @@ public class InteractiveConsole {
         }
     }
 
-    private void cmdCreateTicket(String userId) {
+    private void cmdCreateTicket(String currentUserId) {
         try {
-            System.out.print("Ticket subject: ");
+            System.out.print("Account id (the card will be issued for this account): ");
+            String accountId = scanner.nextLine().trim();
+            System.out.print("Ticket subject (e.g. Card request): ");
             String subj = scanner.nextLine().trim();
-            System.out.print("Ticket description: ");
+            System.out.print("Ticket description / notes: ");
             String desc = scanner.nextLine().trim();
-            ticketService.create(userId, subj, desc);
-            System.out.println("Ticket created.");
+
+            ticketService.create(currentUserId, accountId, subj, desc);
+            System.out.println("Ticket created (card request). Admin will review it.");
         } catch (Exception e) {
             System.out.println("Ticket error: " + e.getMessage());
         }
@@ -630,6 +652,8 @@ public class InteractiveConsole {
             System.out.println("1) List accounts");
             System.out.println("2) Change account status (freeze/suspend/close/reopen)");
             System.out.println("3) View audit (prints audit summary)");
+            System.out.println("4) Export audit CSV");
+            System.out.println("5) Card management (issue/block/unblock/cancel/list)");
             System.out.println("0) Back");
             System.out.print("> ");
             String choice = scanner.nextLine().trim();
@@ -643,6 +667,11 @@ public class InteractiveConsole {
                 case "3":
                     cmdPrintAuditSummary();
                     break;
+                case "4":
+                    cmdExportAuditCsv();
+                    break;
+                case "5":
+                    cmdListTickets(); break;
 
                 case "0":
                     back = true;
@@ -797,5 +826,109 @@ public class InteractiveConsole {
         } catch (Exception e) {
             System.out.println("External transfer error: " + e.getMessage());
         }
-    }}
+    }
+    private void cmdExportAuditCsv() {
+        try {
+            transactions.AuditLog audit = txService.getAuditLog();
+            if (audit == null) {
+                System.out.println("Audit log not available.");
+                return;
+            }
+
+            List<transactions.AuditLog.Entry> entries = audit.getEntries();
+            if (entries == null || entries.isEmpty()) {
+                System.out.println("No audit entries to export.");
+                return;
+            }
+
+            Path dir = Paths.get("reports");
+            Files.createDirectories(dir);
+
+            String fname = "audit-" + DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
+                    .format(LocalDateTime.now()) + ".csv";
+            Path out = dir.resolve(fname);
+
+            try (BufferedWriter w = Files.newBufferedWriter(out, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                w.write("timestamp,action,from,to,amount,note");
+                w.newLine();
+                for (transactions.AuditLog.Entry e : entries) {
+                    String ts = e.getTimestamp() != null ? e.getTimestamp().toString() : "";
+                    String action = safe(e.getAction());
+                    String from = safe(e.getFrom());
+                    String to = safe(e.getTo());
+                    String amount = String.format("%.2f", e.getAmount());
+                    String note = safe(e.getNote());
+
+                    // escape quotes and wrap fields that may contain comma
+                    w.write(escapeCsv(ts) + "," + escapeCsv(action) + "," + escapeCsv(from) + "," + escapeCsv(to) + "," + amount + "," + escapeCsv(note));
+                    w.newLine();
+                }
+            }
+
+            System.out.println("Exported audit CSV to: " + out.toAbsolutePath());
+        } catch (Exception ex) {
+            System.out.println("Export failed: " + ex.getMessage());
+        }
+    }
+
+    private static String safe(String s) {
+        return s == null ? "" : s;
+    }
+
+    private static String escapeCsv(String s) {
+        if (s == null) return "";
+        String out = s.replace("\"", "\"\"");
+        if (out.contains(",") || out.contains("\"") || out.contains("\n") || out.contains("\r")) {
+            return "\"" + out + "\"";
+        }
+        return out;
+    }
+
+    private void cmdListTickets() {
+        System.out.println("=== Card Requests (Tickets) ===");
+        var list = ticketService.listOpen();
+        if (list.isEmpty()) { System.out.println("(no open tickets)"); return; }
+
+        for (Ticket t : list) {
+            System.out.printf("%s : account=%s user=%s status=%s created=%s%n  subject=%s%n  desc=%s%n  messages=%s%n",
+                    t.id, t.accountId, t.userId, t.status, t.createdAt, t.subject, t.description, t.messages);
+        }
+
+        while (true) {
+            System.out.println("Options: A <id> = Approve, R <id> = Reject, B = Back");
+            System.out.print("> ");
+            String line = scanner.nextLine().trim();
+            if (line.isEmpty()) continue;
+            String[] parts = line.split("\\s+", 2);
+            String cmd = parts[0].toUpperCase();
+            if ("B".equals(cmd)) return;
+
+            if (("A".equals(cmd) || "R".equals(cmd)) && parts.length < 2) {
+                System.out.println("Missing ticket id. Usage: A <id>  or  R <id>");
+                continue;
+            }
+            String id = parts.length > 1 ? parts[1].trim() : "";
+
+            try {
+                if ("A".equals(cmd)) {
+                    Card c = ticketService.approve(id, ADMIN_USER);
+                    System.out.println("Approved. Issued card id=" + c.getId() + " number=" + c.getMaskedPan());
+                    return;
+                } else if ("R".equals(cmd)) {
+                    System.out.print("Rejection reason: ");
+                    String reason = scanner.nextLine().trim();
+                    ticketService.reject(id, ADMIN_USER, reason);
+                    System.out.println("Rejected ticket " + id);
+                    return;
+                } else {
+                    System.out.println("Unknown command. Use A, R or B.");
+                }
+            } catch (Exception e) {
+                System.out.println("Operation failed: " + e.getMessage());
+            }
+        }
+    }
+
+
+}
 
