@@ -27,5 +27,12 @@ public class InsuranceDecorator extends AccountDecorator {
                 throw ex;
             }
         }
+
+    }
+    @Override
+    public double getAvailableBalance() {
+        // allow deposit coverage up to coverAmount in validation
+        double base = wrapped.getAvailableBalance(); // chain to underlying
+        return base + coverAmount;
     }
 }

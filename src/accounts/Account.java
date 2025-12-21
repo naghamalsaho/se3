@@ -31,4 +31,8 @@ public interface Account {
     void suspend();
     void close();
     void reopen();
+    default double getAvailableBalance() {
+        return getBalance();
+    }
+
 }

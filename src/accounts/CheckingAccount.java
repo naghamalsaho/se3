@@ -13,8 +13,8 @@ public class CheckingAccount implements Account {
     private double balance;
     private final List<NotificationObserver> observers = new ArrayList<>();
 
-    // overdraft allowed to -500
-    private double overdraftLimit = -500.0;
+    // overdraft allowed (positive number) — default 500
+    private double overdraftLimit = 500.0;
 
     private AccountStatus status = new ActiveState();
 
@@ -58,8 +58,11 @@ public class CheckingAccount implements Account {
     public void withdrawInternal(double amount) {
         if (amount <= 0) throw new IllegalArgumentException("Amount>0");
 
-        if (balance - amount < overdraftLimit)
+        // compute available = balance + overdraftLimit
+        double available = getAvailableBalance();
+        if (amount > available) {
             throw new IllegalStateException("Overdraft limit exceeded");
+        }
 
         double old = balance;
         balance -= amount;
@@ -124,13 +127,20 @@ public class CheckingAccount implements Account {
     public void reopen() {
         setStatus(new ActiveState());
     }
-    // inside CheckingAccount class
-    public double getOverdraftLimit() {
-        return overdraftLimit;
-    }
+
+    // ------------------------ OVERDRAFT API -------------------------- //
 
     public void setOverdraftLimit(double limit) {
-        this.overdraftLimit = limit;
+        // accept only non-negative numbers (0 = no overdraft)
+        this.overdraftLimit = Math.max(0.0, limit);
     }
 
+    public double getOverdraftLimit() {
+        return this.overdraftLimit;
+    }
+
+    @Override
+    public double getAvailableBalance() {
+        return getBalance() + getOverdraftLimit();
+    }
 }
